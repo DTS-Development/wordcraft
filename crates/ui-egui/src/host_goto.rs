@@ -396,9 +396,9 @@ mod tests {
             }
         }
         // One past the last match is not found.
-        assert_eq!(goto(&mut a, &Goto::new(Scope::Body, "{{name}}", 9).unwrap()), Err(Failure::NotFound));
+        assert_eq!(goto(&mut a, &Goto::new(Scope::Body, "{{name}}", 10).unwrap()), Err(Failure::NotFound));
         // A total that is not the document's is not found either, whatever the occurrence.
-        assert_eq!(goto(&mut a, &Goto::new(Scope::Body, "{{name}}", 1).unwrap().with_total(Some(7)).unwrap()), Err(Failure::NotFound));
+        assert_eq!(goto(&mut a, &Goto::new(Scope::Body, "{{name}}", 1).unwrap().with_total(Some(8)).unwrap()), Err(Failure::NotFound));
     }
 
     #[test]
