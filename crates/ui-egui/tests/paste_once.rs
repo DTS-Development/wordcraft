@@ -1,5 +1,5 @@
-//! Web paste (temporary tester check): Cmd+V arrives as a key press plus a Paste event (pre-fix)
-//! or as the Paste event alone (post-fix). Copied formatting must come back once.
+//! Web paste: the browser shell drops the Cmd+V key press (`wordcraft-web` clipboard_keys), so the
+//! app sees the Paste event alone. Pasting the same text as the app's own copy keeps its formatting once.
 
 use serde_json::json;
 use wordcraft_engine::Session;
@@ -40,10 +40,6 @@ fn copy_bold_strong(h: &mut egui_kittest::Harness<'static, WordApp>) {
     h.step();
 }
 
-fn key_v(pressed: bool) -> egui::Event {
-    egui::Event::Key { key: egui::Key::V, physical_key: None, pressed, repeat: false, modifiers: egui::Modifiers::COMMAND }
-}
-
 #[test]
 fn post_fix_paste_event_alone_keeps_formatting_once() {
     let mut h = harness();
@@ -53,17 +49,6 @@ fn post_fix_paste_event_alone_keeps_formatting_once() {
     assert_eq!(body(&h), "plain strongstrong");
     assert!(bold_at(&h, 12), "pasted copy keeps bold");
     assert!(bold_at(&h, 6), "original keeps its bold");
-}
-
-#[test]
-fn pre_fix_key_plus_paste_event_duplicates() {
-    let mut h = harness();
-    copy_bold_strong(&mut h);
-    h.event(key_v(true));
-    h.event(egui::Event::Paste("strong".into()));
-    h.event(key_v(false));
-    h.step();
-    println!("PRE-FIX body = {:?}", body(&h));
 }
 
 #[test]
@@ -83,40 +68,4 @@ fn empty_paste_event_changes_nothing() {
     h.event(egui::Event::Paste(String::new()));
     h.step();
     assert_eq!(body(&h), before);
-}
-
-#[test]
-fn ime_preedit_then_paste_event() {
-    let mut h = harness();
-    copy_bold_strong(&mut h);
-    h.event(egui::Event::Ime(egui::ImeEvent::Preedit { text: "ㅎ".into(), active_range_chars: None }));
-    h.step();
-    h.event(egui::Event::Paste("strong".into()));
-    h.step();
-    println!("IME body = {:?} preedit = {:?}", body(&h), h.state().canvas.ime_preedit);
-}
-
-#[test]
-fn equation_edit_paste_event_types_text_into_equation() {
-    let mut h = harness();
-    copy_bold_strong(&mut h);
-    h.state_mut().run("insert.equation", json!({})).unwrap();
-    h.step();
-    println!("MATH opened = {}", h.state().session.math.is_some());
-    h.event(egui::Event::Paste("strong".into()));
-    h.step();
-    println!("MATH post-fix body = {:?} math = {:?}", body(&h), h.state().session.math.is_some());
-}
-
-#[test]
-fn equation_edit_pre_fix_key_plus_paste() {
-    let mut h = harness();
-    copy_bold_strong(&mut h);
-    h.state_mut().run("insert.equation", json!({})).unwrap();
-    h.step();
-    h.event(key_v(true));
-    h.event(egui::Event::Paste("strong".into()));
-    h.event(key_v(false));
-    h.step();
-    println!("MATH pre-fix body = {:?} math = {:?}", body(&h), h.state().session.math.is_some());
 }
