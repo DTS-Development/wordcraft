@@ -346,7 +346,7 @@ mod tests {
 
     fn location(v: &serde_json::Value) -> Goto {
         let scope = Scope::parse(v["story"].as_str().unwrap()).unwrap();
-        Goto::new(scope, v["text"].as_str().unwrap(), v["occurrence"].as_u64().unwrap()).unwrap()
+        Goto::new(scope, v["text"].as_str().unwrap(), v["occurrence"].as_u64().unwrap()).unwrap().with_total(v["total"].as_u64()).unwrap()
     }
 
     /// The paragraph the selection is in.
