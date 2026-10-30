@@ -114,7 +114,7 @@ fn uncounted(o: &InlineObject) -> bool {
             | InlineObject::PermStart { .. }
             | InlineObject::PermEnd { .. }
             | InlineObject::ControlStart { .. }
-            | InlineObject::ControlEnd { .. }
+            | InlineObject::ControlEnd
             | InlineObject::Equation { .. }
     )
 }
