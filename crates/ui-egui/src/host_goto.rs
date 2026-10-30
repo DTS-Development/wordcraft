@@ -114,13 +114,13 @@ fn stories(doc: &Document, scope: Scope) -> Vec<StoryRef> {
 /// The notes of `kind` the body refers to, in the order its paragraphs first refer to them (a
 /// note referred to twice counts once; one nothing refers to is left out).
 fn noted(doc: &Document, kind: PartKind) -> Vec<StoryRef> {
-    let mut out = Vec::<StoryRef>::new();
+    let (mut out, mut seen) = (Vec::<StoryRef>::new(), std::collections::HashSet::new());
     for path in doc.para_paths(StoryRef::Body) {
         let Some(p) = doc.para(StoryRef::Body, &path) else { continue };
         for o in &p.objects {
             if let InlineObject::NoteRef { id, .. } = o
                 && doc.parts.get(id).is_some_and(|part| part.kind == kind)
-                && !out.contains(&StoryRef::Part(*id))
+                && seen.insert(*id)
             {
                 out.push(StoryRef::Part(*id));
             }
@@ -585,8 +585,7 @@ mod tests {
         let mut a = open(NOTE_DOCX);
         let expected: serde_json::Value = serde_json::from_str(NOTE_EXPECTED).unwrap();
         let docx = &expected["docx"];
-        // Marks (the reference, a note's number) are not compared.
-        let plain = |v: Vec<String>| v.into_iter().map(|p| p.replace('\u{fffc}', "")).collect::<Vec<_>>();
+        // Marks (a reference, a note's number) are counted: one U+FFFC each, as the host counts them.
         for (name, scope) in [("body", Scope::Body), ("footnote", Scope::Footnote), ("endnote", Scope::Endnote)] {
             let want: Vec<String> = docx["scopes"][name].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect();
             let got: Vec<String> = stories(&a.session.doc, scope)
@@ -596,7 +595,7 @@ mod tests {
                     doc.para_paths(st).into_iter().filter_map(move |p| doc.para(st, &p).map(|p| counted(p).text.into_owned()))
                 })
                 .collect();
-            assert_eq!(plain(got), plain(want), "{name} paragraphs");
+            assert_eq!(got, want, "{name} paragraphs");
         }
         let mut places: Vec<(serde_json::Value, Option<String>)> =
             docx["probes"].as_array().unwrap().iter().map(|p| (p["location"].clone(), Some(p["paragraph"].as_str().unwrap().to_string()))).collect();
@@ -607,9 +606,9 @@ mod tests {
         for (loc, paragraph) in places {
             let g = location(&loc);
             goto(&mut a, &g).unwrap_or_else(|e| panic!("{loc}: {e:?}"));
-            assert_eq!(selected(&a).1.replace('\u{fffc}', ""), g.text, "{loc}");
+            assert_eq!(selected(&a).1, g.text, "{loc}");
             if let Some(paragraph) = paragraph {
-                assert_eq!(selected_paragraph(&a).replace('\u{fffc}', ""), paragraph.replace('\u{fffc}', ""), "{loc}");
+                assert_eq!(selected_paragraph(&a), paragraph, "{loc}");
             }
         }
     }
