@@ -360,10 +360,18 @@ mod tests {
         let expected: serde_json::Value = serde_json::from_str(JUMP_EXPECTED).unwrap();
         for (name, scope) in [("body", Scope::Body), ("header", Scope::Header), ("footer", Scope::Footer)] {
             let want: Vec<String> = expected["docx"]["scopes"][name].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect();
-            // The host ends the text box's host paragraph with an object mark ("Box \u{fffc}"); the model
-            // keeps none there. A mark at the end moves no match, so it is not compared.
-            let trim = |v: Vec<String>| v.into_iter().map(|p| p.trim_end_matches('\u{fffc}').to_string()).collect::<Vec<_>>();
-            assert_eq!(trim(paragraphs(&a, scope)), trim(want), "{name} paragraphs");
+            // The model keeps no mark for a text box's anchor ("Box \u{fffc}", "Mid \u{fffc} end" for the
+            // host); it moves no match unless it sits inside one, and then `total` tells (see
+            // `a_text_box_inside_a_tag_ends_in_not_found`). Marks are not compared.
+            let plain = |v: Vec<String>| v.into_iter().map(|p| p.replace('\u{fffc}', "")).collect::<Vec<_>>();
+            let counted_text: Vec<String> = stories(&a.session.doc, scope)
+                .into_iter()
+                .flat_map(|st| {
+                    let doc = &a.session.doc;
+                    doc.para_paths(st).into_iter().filter_map(move |p| doc.para(st, &p).map(|p| counted(p).text.into_owned()))
+                })
+                .collect();
+            assert_eq!(plain(counted_text), plain(want), "{name} paragraphs");
         }
     }
 
@@ -381,13 +389,16 @@ mod tests {
         for (loc, paragraph) in places {
             let g = location(&loc);
             goto(&mut a, &g).unwrap_or_else(|e| panic!("{loc}: {e:?}"));
-            assert_eq!(selected(&a).1, g.text, "{loc}");
+            // A mark inside the tag (a bookmark) is part of what is selected.
+            assert_eq!(selected(&a).1.replace('\u{fffc}', ""), g.text, "{loc}");
             if let Some(paragraph) = paragraph {
-                assert_eq!(selected_paragraph(&a), paragraph, "{loc}");
+                assert_eq!(selected_paragraph(&a).replace('\u{fffc}', ""), paragraph.replace('\u{fffc}', ""), "{loc}");
             }
         }
         // One past the last match is not found.
-        assert_eq!(goto(&mut a, &Goto::new(Scope::Body, "{{name}}", 5).unwrap()), Err(Failure::NotFound));
+        assert_eq!(goto(&mut a, &Goto::new(Scope::Body, "{{name}}", 9).unwrap()), Err(Failure::NotFound));
+        // A total that is not the document's is not found either, whatever the occurrence.
+        assert_eq!(goto(&mut a, &Goto::new(Scope::Body, "{{name}}", 1).unwrap().with_total(Some(7)).unwrap()), Err(Failure::NotFound));
     }
 
     #[test]
@@ -462,5 +473,19 @@ mod tests {
             goto(&mut a, &Goto::new(Scope::Body, &text, 1).unwrap().with_total(Some(1)).unwrap()).unwrap();
             assert_eq!(selected(&a).1, text);
         }
+    }
+
+    /// The host counts a text box's anchor as a mark, so a tag with an anchor inside it
+    /// (`{{na[box]me}}`) is not one for the host. The model keeps no mark for the box, so the fork
+    /// sees a tag there and counts one more than the host: `total` differs and nothing is selected.
+    #[test]
+    fn a_text_box_inside_a_tag_ends_in_not_found() {
+        let mut a = app("{{name}} x {{name}}");
+        let before = a.session.sel.clone();
+        for occurrence in [1, 2] {
+            let g = Goto::new(Scope::Body, "{{name}}", occurrence).unwrap().with_total(Some(1)).unwrap();
+            assert_eq!(goto(&mut a, &g), Err(Failure::NotFound));
+        }
+        assert_eq!(a.session.sel, before);
     }
 }
