@@ -1,10 +1,12 @@
 //! A place the host page asks to see (`wordcraft:goto`): the n-th match of a text in the body,
-//! the headers or the footers is selected and scrolled into view.
+//! the headers, the footers, the footnotes or the endnotes is selected and scrolled into view.
 //!
 //! The count is the host's too (the tag check counts the same way): a paragraph's text, tables
 //! row by row and cell by cell, matches inside one paragraph, left to right, never overlapping,
 //! case-sensitive. The headers (footers) are one story: their parts one after another in the
-//! order the file first refers to them (a part's id grows in that order when a file is read).
+//! order the file first refers to them (a part's id grows in that order when a file is read). The
+//! footnotes (endnotes) are one story too: the notes the body refers to, in the order its paragraphs
+//! first refer to them, each once; a note nothing refers to is not counted.
 //!
 //! Marks the host does not count are left out of a paragraph's text before matching: bookmarks,
 //! comment ranges, editable ranges, content control ends and equations (each is one U+FFFC in the
@@ -29,6 +31,8 @@ pub enum Scope {
     Body,
     Header,
     Footer,
+    Footnote,
+    Endnote,
 }
 
 impl Scope {
@@ -37,6 +41,8 @@ impl Scope {
             "body" => Some(Self::Body),
             "header" => Some(Self::Header),
             "footer" => Some(Self::Footer),
+            "footnote" => Some(Self::Footnote),
+            "endnote" => Some(Self::Endnote),
             _ => None,
         }
     }
@@ -98,9 +104,29 @@ fn stories(doc: &Document, scope: Scope) -> Vec<StoryRef> {
         Scope::Body => return vec![StoryRef::Body],
         Scope::Header => PartKind::Header,
         Scope::Footer => PartKind::Footer,
+        Scope::Footnote => return noted(doc, PartKind::Footnote),
+        Scope::Endnote => return noted(doc, PartKind::Endnote),
     };
     // `parts` is ordered by id.
     doc.parts.iter().filter(|(_, p)| p.kind == kind).map(|(id, _)| StoryRef::Part(*id)).collect()
+}
+
+/// The notes of `kind` the body refers to, in the order its paragraphs first refer to them (a
+/// note referred to twice counts once; one nothing refers to is left out).
+fn noted(doc: &Document, kind: PartKind) -> Vec<StoryRef> {
+    let mut out = Vec::<StoryRef>::new();
+    for path in doc.para_paths(StoryRef::Body) {
+        let Some(p) = doc.para(StoryRef::Body, &path) else { continue };
+        for o in &p.objects {
+            if let InlineObject::NoteRef { id, .. } = o
+                && doc.parts.get(id).is_some_and(|part| part.kind == kind)
+                && !out.contains(&StoryRef::Part(*id))
+            {
+                out.push(StoryRef::Part(*id));
+            }
+        }
+    }
+    out
 }
 
 /// Whether the host leaves this object out of a paragraph's text.
@@ -487,5 +513,104 @@ mod tests {
             assert_eq!(goto(&mut a, &g), Err(Failure::NotFound));
         }
         assert_eq!(a.session.sel, before);
+    }
+
+    /// A document of `body`'s paragraphs, with a note of `kind` per text in `notes` (ids grow in that
+    /// order); `refs` (indexes into `notes`, one per body reference, at paragraph start) are made in
+    /// paragraph `i` for the i-th entry.
+    fn with_notes(kind: PartKind, notes: &[&str], refs: &[usize]) -> (WordApp, Vec<u32>) {
+        use wordcraft_doc::para::NoteKind;
+        let mut a = app(&vec!["body"; refs.len().max(1)].join("\n"));
+        let doc = &mut a.session.doc;
+        let ids: Vec<u32> =
+            notes.iter().map(|t| doc.add_part(kind, vec![wordcraft_doc::para_block(Paragraph::with_text(t, Default::default()))])).collect();
+        let nk = if kind == PartKind::Footnote { NoteKind::Footnote } else { NoteKind::Endnote };
+        for (i, r) in refs.iter().enumerate() {
+            let obj = InlineObject::NoteRef { kind: nk, id: ids[*r], custom: String::new() };
+            doc.insert_object(&Pos::body(i, 0), obj, &Default::default()).unwrap();
+        }
+        (a, ids)
+    }
+
+    #[test]
+    fn footnotes_go_by_first_reference_not_by_part_id() {
+        // Parts 0..3 are made in this order but the body refers to the third first, the first twice,
+        // and never to the second.
+        let (mut a, ids) = with_notes(PartKind::Footnote, &["n0 {{f}}", "n1 {{f}}", "n2 {{f}} {{f}}"], &[2, 0, 2, 0]);
+        assert_eq!(stories(&a.session.doc, Scope::Footnote), [StoryRef::Part(ids[2]), StoryRef::Part(ids[0])]);
+        assert_eq!(count(&a.session.doc, Scope::Footnote, "{{f}}"), 3);
+        for (n, story, off) in [(1, ids[2], "n2 ".len()), (2, ids[2], "n2 {{f}} ".len()), (3, ids[0], "n0 ".len())] {
+            goto(&mut a, &Goto::new(Scope::Footnote, "{{f}}", n).unwrap().with_total(Some(3)).unwrap()).unwrap();
+            assert_eq!(selected(&a), (StoryRef::Part(story), "{{f}}".to_string()));
+            assert_eq!(a.session.sel.anchor.off, off);
+        }
+        assert_eq!(goto(&mut a, &Goto::new(Scope::Footnote, "{{f}}", 4).unwrap()), Err(Failure::NotFound));
+        // The unreferenced note is not reachable, and the other kind and the body are not mixed in.
+        assert_eq!(goto(&mut a, &Goto::new(Scope::Footnote, "n1", 1).unwrap()), Err(Failure::NotFound));
+        assert_eq!(count(&a.session.doc, Scope::Endnote, "{{f}}"), 0);
+        assert_eq!(count(&a.session.doc, Scope::Body, "{{f}}"), 0);
+    }
+
+    #[test]
+    fn a_note_total_that_differs_selects_nothing() {
+        let (mut a, _) = with_notes(PartKind::Footnote, &["{{f}}", "{{f}}"], &[1, 0]);
+        let before = a.session.sel.clone();
+        for total in [1, 3] {
+            let g = Goto::new(Scope::Footnote, "{{f}}", 1).unwrap().with_total(Some(total)).unwrap();
+            assert_eq!(goto(&mut a, &g), Err(Failure::NotFound));
+        }
+        assert_eq!(a.session.sel, before);
+    }
+
+    #[test]
+    fn endnotes_are_their_own_story() {
+        let (mut a, ids) = with_notes(PartKind::Endnote, &["e0 {{e}}", "e1 {{e}}"], &[1, 0]);
+        assert_eq!(Scope::parse("endnote"), Some(Scope::Endnote));
+        assert_eq!(Scope::parse("footnote"), Some(Scope::Footnote));
+        assert_eq!(count(&a.session.doc, Scope::Footnote, "{{e}}"), 0);
+        goto(&mut a, &Goto::new(Scope::Endnote, "{{e}}", 1).unwrap().with_total(Some(2)).unwrap()).unwrap();
+        assert_eq!(selected(&a), (StoryRef::Part(ids[1]), "{{e}}".to_string()));
+        assert!(a.canvas.scroll_to_caret);
+        goto(&mut a, &Goto::new(Scope::Endnote, "{{e}}", 2).unwrap()).unwrap();
+        assert_eq!(selected(&a).0, StoryRef::Part(ids[0]));
+    }
+
+    /// The shared fixture of the host's note check (`note-jump.docx`, `expected.json`): notes whose
+    /// reference order is not their id order, one in a table, one unreferenced, a separator.
+    const NOTE_DOCX: &[u8] = include_bytes!("../tests/fixtures/note-jump/note-jump.docx");
+    const NOTE_EXPECTED: &str = include_str!("../tests/fixtures/note-jump/expected.json");
+
+    #[test]
+    fn the_shared_note_fixture_counts_and_points_where_the_host_expects() {
+        let mut a = open(NOTE_DOCX);
+        let expected: serde_json::Value = serde_json::from_str(NOTE_EXPECTED).unwrap();
+        let docx = &expected["docx"];
+        // Marks (the reference, a note's number) are not compared.
+        let plain = |v: Vec<String>| v.into_iter().map(|p| p.replace('\u{fffc}', "")).collect::<Vec<_>>();
+        for (name, scope) in [("body", Scope::Body), ("footnote", Scope::Footnote), ("endnote", Scope::Endnote)] {
+            let want: Vec<String> = docx["scopes"][name].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect();
+            let got: Vec<String> = stories(&a.session.doc, scope)
+                .into_iter()
+                .flat_map(|st| {
+                    let doc = &a.session.doc;
+                    doc.para_paths(st).into_iter().filter_map(move |p| doc.para(st, &p).map(|p| counted(p).text.into_owned()))
+                })
+                .collect();
+            assert_eq!(plain(got), plain(want), "{name} paragraphs");
+        }
+        let mut places: Vec<(serde_json::Value, Option<String>)> =
+            docx["probes"].as_array().unwrap().iter().map(|p| (p["location"].clone(), Some(p["paragraph"].as_str().unwrap().to_string()))).collect();
+        for item in docx["warnings"].as_array().unwrap() {
+            places.push((item["location"].clone(), None));
+        }
+        assert!(places.iter().any(|(l, _)| l["story"] == "footnote") && places.iter().any(|(l, _)| l["story"] == "endnote"));
+        for (loc, paragraph) in places {
+            let g = location(&loc);
+            goto(&mut a, &g).unwrap_or_else(|e| panic!("{loc}: {e:?}"));
+            assert_eq!(selected(&a).1.replace('\u{fffc}', ""), g.text, "{loc}");
+            if let Some(paragraph) = paragraph {
+                assert_eq!(selected_paragraph(&a).replace('\u{fffc}', ""), paragraph.replace('\u{fffc}', ""), "{loc}");
+            }
+        }
     }
 }

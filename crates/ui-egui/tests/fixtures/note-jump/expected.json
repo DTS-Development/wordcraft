@@ -1,0 +1,27 @@
+{
+  "_doc": "note-jump.docx의 기대 위치. 손으로 계산했다(서버 코드가 만든 값이 아님). 규약: 각주(미주) 범위 = w:type이 없거나 normal인 노트 중 본문(document.xml)에서 w:footnoteReference(w:endnoteReference)가 처음 나오는 순서의 노트들. 참조되지 않은 노트와 separator/continuationSeparator는 뺀다. 각주 하나 안은 문단 순서(표는 행→셀→문단). 글자 세는 법은 tag-jump/expected.json과 같다(본문 참조와 노트 첫 run의 번호 표식 footnoteRef/endnoteRef는 U+FFFC 한 글자). occurrence는 범위 안 문단들을 순서대로 보며 text의 겹치지 않는 일치를 센 순번(1부터), total은 같은 범위 안 전체 일치 수다. scopes는 범위별로 세는 문단 목록, noLocation은 위치를 주면 안 되는 키다. data는 검사할 때 template_data로 넣는 값이다.",
+  "docx": {
+    "data": { "name": "N", "title": "T" },
+    "scopes": {
+      "body": ["Body {{name}} start￼", "Mid {{title}}￼￼", "Again {{name}}￼￼", "Last￼"],
+      "footnote": ["\uFFFC{{name}} Third", "Second para {{fnkey}}", "\uFFFCFirst {{name}}", "{{name}}", "Tbl {{title}}", "", "\uFFFCFour {{title}} {{name}}"],
+      "endnote": ["\uFFFCEndnote two {{name}} {{endkey}}", "\uFFFCEndnote one {{name}}"]
+    },
+    "warnings": [
+      { "key": "fnkey", "location": { "kind": "docx", "story": "footnote", "text": "{{fnkey}}", "occurrence": 1, "total": 1 } },
+      { "key": "endkey", "location": { "kind": "docx", "story": "endnote", "text": "{{endkey}}", "occurrence": 1, "total": 1 } }
+    ],
+    "noLocation": ["ghost"],
+    "probes": [
+      { "location": { "kind": "docx", "story": "footnote", "text": "{{name}}", "occurrence": 1, "total": 4 }, "paragraph": "\uFFFC{{name}} Third" },
+      { "location": { "kind": "docx", "story": "footnote", "text": "{{name}}", "occurrence": 2, "total": 4 }, "paragraph": "\uFFFCFirst {{name}}" },
+      { "location": { "kind": "docx", "story": "footnote", "text": "{{name}}", "occurrence": 3, "total": 4 }, "paragraph": "{{name}}" },
+      { "location": { "kind": "docx", "story": "footnote", "text": "{{name}}", "occurrence": 4, "total": 4 }, "paragraph": "\uFFFCFour {{title}} {{name}}" },
+      { "location": { "kind": "docx", "story": "footnote", "text": "{{title}}", "occurrence": 1, "total": 2 }, "paragraph": "Tbl {{title}}" },
+      { "location": { "kind": "docx", "story": "footnote", "text": "{{title}}", "occurrence": 2, "total": 2 }, "paragraph": "\uFFFCFour {{title}} {{name}}" },
+      { "location": { "kind": "docx", "story": "endnote", "text": "{{name}}", "occurrence": 1, "total": 2 }, "paragraph": "\uFFFCEndnote two {{name}} {{endkey}}" },
+      { "location": { "kind": "docx", "story": "endnote", "text": "{{name}}", "occurrence": 2, "total": 2 }, "paragraph": "\uFFFCEndnote one {{name}}" },
+      { "location": { "kind": "docx", "story": "body", "text": "{{name}}", "occurrence": 2, "total": 2 }, "paragraph": "Again {{name}}￼￼" }
+    ]
+  }
+}
