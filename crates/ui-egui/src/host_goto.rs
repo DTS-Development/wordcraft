@@ -1,0 +1,219 @@
+//! A place the host page asks to see (`wordcraft:goto`): the n-th match of a text in the body,
+//! the headers or the footers is selected and scrolled into view.
+//!
+//! The count is the host's too (the tag check counts the same way): a paragraph's text, tables
+//! row by row and cell by cell, matches inside one paragraph, left to right, never overlapping,
+//! case-sensitive. The headers (footers) are one story: their parts one after another in the
+//! order the file first refers to them (a part's id grows in that order when a file is read).
+
+use wordcraft_doc::{Document, PartKind, StoryRef};
+
+use crate::WordApp;
+
+/// The longest text a request may look for, in bytes.
+pub const MAX_TEXT_BYTES: usize = 4000;
+/// The largest occurrence a request may ask for.
+pub const MAX_OCCURRENCE: u64 = 1_000_000;
+
+/// Which stories the count runs over.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Scope {
+    Body,
+    Header,
+    Footer,
+}
+
+impl Scope {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "body" => Some(Self::Body),
+            "header" => Some(Self::Header),
+            "footer" => Some(Self::Footer),
+            _ => None,
+        }
+    }
+}
+
+/// A request that passed [`Goto::new`]'s checks.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Goto {
+    pub scope: Scope,
+    pub text: String,
+    /// Counted from 1.
+    pub occurrence: usize,
+}
+
+/// Why a request couldn't be done; `as_str` is what the host page hears.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Failure {
+    NotFound,
+    Unsupported,
+    Error,
+}
+
+impl Failure {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NotFound => "not-found",
+            Self::Unsupported => "unsupported",
+            Self::Error => "error",
+        }
+    }
+}
+
+impl Goto {
+    /// A request for the `occurrence`-th match of `text`; an empty or oversized text or an
+    /// occurrence of 0 or past [`MAX_OCCURRENCE`] is an error, not a not-found.
+    pub fn new(scope: Scope, text: &str, occurrence: u64) -> Result<Self, Failure> {
+        if text.is_empty() || text.len() > MAX_TEXT_BYTES || occurrence == 0 || occurrence > MAX_OCCURRENCE {
+            return Err(Failure::Error);
+        }
+        Ok(Self { scope, text: text.to_string(), occurrence: occurrence as usize })
+    }
+}
+
+/// The stories of `scope`, in the order the count runs over them.
+fn stories(doc: &Document, scope: Scope) -> Vec<StoryRef> {
+    let kind = match scope {
+        Scope::Body => return vec![StoryRef::Body],
+        Scope::Header => PartKind::Header,
+        Scope::Footer => PartKind::Footer,
+    };
+    // `parts` is ordered by id.
+    doc.parts.iter().filter(|(_, p)| p.kind == kind).map(|(id, _)| StoryRef::Part(*id)).collect()
+}
+
+/// Matches of `text` in each paragraph of `story`, in document order.
+fn matches_in(doc: &Document, story: StoryRef, text: &str) -> usize {
+    doc.para_paths(story).iter().filter_map(|path| doc.para(story, path)).map(|p| p.text.matches(text).count()).sum()
+}
+
+/// The story holding the `n`-th match (from 1) of `text` over `scope`, and which match that is
+/// within the story.
+pub fn locate(doc: &Document, scope: Scope, text: &str, n: usize) -> Option<(StoryRef, usize)> {
+    let mut before = 0;
+    for story in stories(doc, scope) {
+        let here = matches_in(doc, story, text);
+        if n <= before + here {
+            return Some((story, n - before));
+        }
+        before += here;
+    }
+    None
+}
+
+/// Select the match and bring it into view. Nothing changes in the document.
+pub fn goto(app: &mut WordApp, req: &Goto) -> Result<(), Failure> {
+    let (story, n) = locate(&app.session.doc, req.scope, &req.text, req.occurrence).ok_or(Failure::NotFound)?;
+    let story = serde_json::to_value(story).map_err(|_| Failure::Error)?;
+    // `select.text` is on the host's allowed list; a finished command follows the caret.
+    app.run("select.text", serde_json::json!({ "text": req.text, "occurrence": n, "story": story })).map(|_| ()).map_err(|_| Failure::Error)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wordcraft_engine::Session;
+
+    fn app(text: &str) -> WordApp {
+        WordApp::new(Session::new(Document::from_text(text)), Default::default())
+    }
+
+    /// The text the selection covers, in its story.
+    fn selected(a: &WordApp) -> (StoryRef, String) {
+        let (s, f) = (&a.session.sel.anchor, &a.session.sel.focus);
+        let p = a.session.doc.para_at(s).expect("a paragraph");
+        (s.story, p.text[s.off..f.off].to_string())
+    }
+
+    #[test]
+    fn requests_are_checked() {
+        assert_eq!(Goto::new(Scope::Body, "", 1), Err(Failure::Error));
+        assert_eq!(Goto::new(Scope::Body, "x", 0), Err(Failure::Error));
+        assert_eq!(Goto::new(Scope::Body, "x", MAX_OCCURRENCE + 1), Err(Failure::Error));
+        assert_eq!(Goto::new(Scope::Body, &"x".repeat(MAX_TEXT_BYTES + 1), 1), Err(Failure::Error));
+        assert!(Goto::new(Scope::Body, "{{a}}", 2).is_ok());
+        assert_eq!((Scope::parse("header"), Scope::parse("footer"), Scope::parse("notes")), (Some(Scope::Header), Some(Scope::Footer), None));
+    }
+
+    #[test]
+    fn matches_do_not_overlap_and_count_left_to_right() {
+        let mut a = app("aaaa {{x}} {{x}}{{x}}\n{{ x }} {{x}}");
+        // "aa" fits twice in "aaaa", not three times.
+        assert_eq!(matches_in(&a.session.doc, StoryRef::Body, "aa"), 2);
+        let g = Goto::new(Scope::Body, "{{x}}", 4).unwrap();
+        goto(&mut a, &g).unwrap();
+        let (_, sel) = selected(&a);
+        assert_eq!(sel, "{{x}}");
+        // The 4th is in the second paragraph (the spaced `{{ x }}` is another text).
+        assert_eq!(a.session.sel.anchor.path.0, vec![1]);
+        assert_eq!(a.session.sel.anchor.off, "{{ x }} ".len());
+        // Case counts.
+        assert_eq!(goto(&mut a, &Goto::new(Scope::Body, "{{X}}", 1).unwrap()), Err(Failure::NotFound));
+        assert_eq!(goto(&mut a, &Goto::new(Scope::Body, "{{x}}", 5).unwrap()), Err(Failure::NotFound));
+    }
+
+    #[test]
+    fn the_view_follows_the_selection() {
+        let mut a = app("one\ntwo {{x}}");
+        a.canvas.scroll_to_caret = false;
+        goto(&mut a, &Goto::new(Scope::Body, "{{x}}", 1).unwrap()).unwrap();
+        assert!(a.canvas.scroll_to_caret, "the canvas scrolls to the selection on the next pass");
+    }
+
+    #[test]
+    fn a_host_locked_document_still_goes_to_a_place() {
+        let mut a = app("one {{x}}");
+        a.session.lock_to_host();
+        goto(&mut a, &Goto::new(Scope::Body, "{{x}}", 1).unwrap()).unwrap();
+        assert_eq!(selected(&a).1, "{{x}}");
+    }
+
+    #[test]
+    fn a_table_counts_row_by_row_and_cell_by_cell() {
+        let mut a = app("before {{t}}");
+        a.session.sel = wordcraft_engine::Selection::caret(a.session.doc.end_of(StoryRef::Body));
+        a.run("insert.table", serde_json::json!({"data": [["{{t}} a", "b {{t}}"], ["{{t}}", "{{t}}{{t}}"]]})).unwrap();
+        let doc = &a.session.doc;
+        // Counted: 1 before the table, then a1, b1, a2, b2 (two).
+        let (story, n) = locate(doc, Scope::Body, "{{t}}", 5).unwrap();
+        assert_eq!((story, n), (StoryRef::Body, 5));
+        goto(&mut a, &Goto::new(Scope::Body, "{{t}}", 3).unwrap()).unwrap();
+        // 3rd = row 1, cell 2: the path is [table block, row, cell, block].
+        assert_eq!(a.session.sel.anchor.path.0[1..3], [0, 1]);
+        goto(&mut a, &Goto::new(Scope::Body, "{{t}}", 5).unwrap()).unwrap();
+        assert_eq!(a.session.sel.anchor.path.0[1..3], [1, 1]);
+        assert_eq!(a.session.sel.anchor.off, 0);
+        goto(&mut a, &Goto::new(Scope::Body, "{{t}}", 6).unwrap()).unwrap();
+        assert_eq!((a.session.sel.anchor.path.0[1..3].to_vec(), a.session.sel.anchor.off), (vec![1, 1], "{{t}}".len()));
+    }
+
+    #[test]
+    fn headers_and_footers_are_one_story_each_in_part_order() {
+        let mut a = app("body {{h}}");
+        a.run("insert.header", serde_json::json!({"text": "H1 {{h}}"})).unwrap();
+        a.run("insert.closeHeader", serde_json::json!({})).unwrap();
+        a.run("layout.differentFirstPage", serde_json::json!({"value": true})).unwrap();
+        a.run("insert.header", serde_json::json!({"text": "H2 {{h}} {{h}}"})).unwrap();
+        a.run("insert.closeHeader", serde_json::json!({})).unwrap();
+        a.run("insert.footer", serde_json::json!({"text": "F1 {{h}}"})).unwrap();
+        a.run("insert.closeHeader", serde_json::json!({})).unwrap();
+        let sect = a.session.doc.last_section.clone();
+        let (h_default, h_first) = (sect.headers.default.unwrap(), sect.headers.first.unwrap());
+        assert!(h_default < h_first);
+        // The count in the body does not see them, nor the footer the headers.
+        assert_eq!(locate(&a.session.doc, Scope::Body, "{{h}}", 2), None);
+        assert_eq!(locate(&a.session.doc, Scope::Header, "{{h}}", 1), Some((StoryRef::Part(h_default), 1)));
+        assert_eq!(locate(&a.session.doc, Scope::Header, "{{h}}", 3), Some((StoryRef::Part(h_first), 2)));
+        assert_eq!(locate(&a.session.doc, Scope::Header, "{{h}}", 4), None);
+        goto(&mut a, &Goto::new(Scope::Header, "{{h}}", 3).unwrap()).unwrap();
+        assert_eq!(selected(&a), (StoryRef::Part(h_first), "{{h}}".to_string()));
+        assert_eq!(a.session.sel.anchor.off, "H2 {{h}} ".len());
+        goto(&mut a, &Goto::new(Scope::Footer, "{{h}}", 1).unwrap()).unwrap();
+        assert_eq!(selected(&a).1, "{{h}}");
+        assert_eq!(goto(&mut a, &Goto::new(Scope::Footer, "{{h}}", 2).unwrap()), Err(Failure::NotFound));
+        // Going back to the body leaves the header.
+        goto(&mut a, &Goto::new(Scope::Body, "{{h}}", 1).unwrap()).unwrap();
+        assert_eq!(selected(&a).0, StoryRef::Body);
+    }
+}

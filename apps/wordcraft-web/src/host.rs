@@ -18,6 +18,13 @@
 //! - `wordcraft:table-inserted` (to the parent): `{ id }` when it did.
 //! - `wordcraft:table-failed` (to the parent): `{ id, error }` when it couldn't (bad rows, a
 //!   document that refuses the table).
+//! - `wordcraft:goto` (from the parent): `{ id, location }`, `location` `{ kind: "docx", story:
+//!   "body" | "header" | "footer", text, occurrence }`. It selects the `occurrence`-th (from 1)
+//!   match of `text` in the story and scrolls it into view (see `host_goto` for how matches
+//!   are counted). Nothing in the document changes.
+//! - `wordcraft:goto-done` (to the parent): `{ id }` when it did.
+//! - `wordcraft:goto-failed` (to the parent): `{ id, reason }`, reason `not-found`,
+//!   `unsupported` (a location of another kind or story) or `error` (a malformed request).
 //!
 //! - `wordcraft:request-bytes` (from the parent): `{ id, purpose }`, purpose `"save"`, `"check"` or
 //!   `"preview"`. The document as it is now, in the format Save writes.
@@ -49,6 +56,7 @@ use wasm_bindgen::JsCast as _;
 use wasm_bindgen::JsValue;
 use wasm_bindgen::closure::Closure;
 use wordcraft_engine::host_policy::HostPolicy;
+use wordcraft_ui_egui::host_goto::{self, Failure, Goto, Scope};
 use wordcraft_ui_egui::host_table::{self, MAX_CELL_CHARS, MAX_COLS, MAX_ROWS};
 use wordcraft_ui_egui::{HostPolicySlot, Inbox, Services, WordApp, queue_host_file};
 
@@ -63,6 +71,9 @@ const MAX_ID_BYTES: usize = 200;
 
 /// The longest purpose text echoed back to the parent.
 const MAX_PURPOSE_CHARS: usize = 200;
+
+/// Most goto requests waiting for the next frame; more are dropped.
+const MAX_PENDING_GOTOS: usize = 16;
 
 /// Most byte requests waiting for the next frame; more are dropped.
 const MAX_PENDING_BYTES: usize = 16;
@@ -104,6 +115,12 @@ struct TableRequest {
     rows: Result<Vec<Vec<String>>, String>,
 }
 
+/// A place the parent asked to see: its request id and the place, or why it can't be read.
+struct GotoRequest {
+    id: String,
+    goto: Result<Goto, Failure>,
+}
+
 #[derive(Clone)]
 pub struct Bridge {
     window: web_sys::Window,
@@ -113,6 +130,8 @@ pub struct Bridge {
     reported: Rc<Cell<Option<bool>>>,
     /// Tables from the parent not yet inserted.
     tables: Rc<RefCell<Vec<TableRequest>>>,
+    /// Places from the parent not yet shown.
+    gotos: Rc<RefCell<Vec<GotoRequest>>>,
     /// Byte requests from the parent not yet answered.
     byte_requests: Rc<RefCell<Vec<BytesRequest>>>,
     /// While a `save` request runs, the file the app hands to `download` is kept here instead of
@@ -142,6 +161,7 @@ impl Bridge {
             origin,
             reported: Rc::default(),
             tables: Rc::default(),
+            gotos: Rc::default(),
             byte_requests: Rc::default(),
             capturing: Rc::default(),
             captured: Rc::default(),
@@ -198,6 +218,24 @@ impl Bridge {
             match rows.and_then(|rows| host_table::insert_table(app, &rows)) {
                 Ok(()) => self.send(&[("type", "wordcraft:table-inserted".into()), ("id", id.as_str().into())]),
                 Err(error) => self.send(&[("type", "wordcraft:table-failed".into()), ("id", id.as_str().into()), ("error", error.as_str().into())]),
+            };
+        }
+    }
+
+    /// Before each pass: places from the parent are selected and scrolled to, and the parent hears
+    /// how each went. A document still opening has no place to go to yet.
+    pub fn deliver_gotos(&self, app: &mut WordApp) {
+        for GotoRequest { id, goto } in std::mem::take(&mut *self.gotos.borrow_mut()) {
+            let done = match goto {
+                Ok(_) if !app.host_document_ready() => Err(Failure::NotFound),
+                Ok(goto) => host_goto::goto(app, &goto),
+                Err(failure) => Err(failure),
+            };
+            match done {
+                Ok(()) => self.send(&[("type", "wordcraft:goto-done".into()), ("id", id.as_str().into())]),
+                Err(failure) => {
+                    self.send(&[("type", "wordcraft:goto-failed".into()), ("id", id.as_str().into()), ("reason", failure.as_str().into())])
+                }
             };
         }
     }
@@ -341,6 +379,7 @@ impl Bridge {
         let parent = self.parent.clone();
         let origin = self.origin.clone();
         let tables = self.tables.clone();
+        let gotos = self.gotos.clone();
         let byte_requests = self.byte_requests.clone();
         let bridge = self.clone();
         let on_message = Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |event: web_sys::MessageEvent| {
@@ -360,6 +399,12 @@ impl Bridge {
                     let Some(id) = string(&data, "id").filter(|id| !id.is_empty() && id.len() <= MAX_ID_BYTES) else { return };
                     if tables.borrow().len() < MAX_PENDING_TABLES {
                         tables.borrow_mut().push(TableRequest { id, rows: rows(&data) });
+                    }
+                }
+                Some("wordcraft:goto") => {
+                    let Some(id) = string(&data, "id").filter(|id| !id.is_empty() && id.len() <= MAX_ID_BYTES) else { return };
+                    if gotos.borrow().len() < MAX_PENDING_GOTOS {
+                        gotos.borrow_mut().push(GotoRequest { id, goto: goto_location(&data) });
                     }
                 }
                 Some("wordcraft:request-bytes") => {
@@ -415,6 +460,26 @@ fn policy(data: &JsValue) -> HostPolicy {
 
 fn string(data: &JsValue, key: &str) -> Option<String> {
     js_sys::Reflect::get(data, &JsValue::from_str(key)).ok()?.as_string()
+}
+
+/// The place a `goto` message names: a `docx` location with a known story, a text and an
+/// occurrence. Another kind of location is `Unsupported`; anything unreadable is an `Error`.
+fn goto_location(data: &JsValue) -> Result<Goto, Failure> {
+    let get = |from: &JsValue, key: &str| js_sys::Reflect::get(from, &JsValue::from_str(key)).ok();
+    let location = get(data, "location").filter(|l| l.is_object()).ok_or(Failure::Error)?;
+    if string(&location, "kind").as_deref() != Some("docx") {
+        return Err(Failure::Unsupported);
+    }
+    let scope = string(&location, "story").and_then(|s| Scope::parse(&s)).ok_or(Failure::Unsupported)?;
+    // A text far past the limit is refused before it is copied (`Goto::new` then checks the bytes).
+    let text = get(&location, "text")
+        .filter(|t| t.dyn_ref::<js_sys::JsString>().is_some_and(|s| s.length() as usize <= host_goto::MAX_TEXT_BYTES))
+        .and_then(|t| t.as_string());
+    let occurrence = get(&location, "occurrence").and_then(|o| o.as_f64()).filter(|o| o.fract() == 0.0 && *o >= 1.0).map(|o| o as u64);
+    match (text, occurrence) {
+        (Some(text), Some(occurrence)) => Goto::new(scope, &text, occurrence),
+        _ => Err(Failure::Error),
+    }
 }
 
 /// `rows` as an array of arrays of strings, no larger than a table may be (checked before the

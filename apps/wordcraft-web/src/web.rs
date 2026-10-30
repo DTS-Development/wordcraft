@@ -183,6 +183,7 @@ impl eframe::App for WebShell {
         }
         if let Some(bridge) = &self.bridge {
             bridge.deliver_tables(&mut self.app);
+            bridge.deliver_gotos(&mut self.app);
             bridge.deliver_bytes(&mut self.app);
         }
         self.app.logic(ctx);
