@@ -5,8 +5,16 @@
 //! row by row and cell by cell, matches inside one paragraph, left to right, never overlapping,
 //! case-sensitive. The headers (footers) are one story: their parts one after another in the
 //! order the file first refers to them (a part's id grows in that order when a file is read).
+//!
+//! Marks the host does not count are left out of a paragraph's text before matching: bookmarks,
+//! comment ranges, editable ranges, content control ends and equations (each is one U+FFFC in the
+//! model). A match that spans one still selects the whole tag: the selection goes back to the
+//! paragraph's own offsets.
 
-use wordcraft_doc::{Document, PartKind, StoryRef};
+use std::borrow::Cow;
+
+use wordcraft_doc::para::OBJ;
+use wordcraft_doc::{Document, InlineObject, Paragraph, PartKind, Path, Pos, StoryRef};
 
 use crate::WordApp;
 
@@ -41,6 +49,9 @@ pub struct Goto {
     pub text: String,
     /// Counted from 1.
     pub occurrence: usize,
+    /// How many matches the host counted in the story; when the document has another number it
+    /// has changed, and nothing is selected.
+    pub total: Option<usize>,
 }
 
 /// Why a request couldn't be done; `as_str` is what the host page hears.
@@ -68,7 +79,16 @@ impl Goto {
         if text.is_empty() || text.len() > MAX_TEXT_BYTES || occurrence == 0 || occurrence > MAX_OCCURRENCE {
             return Err(Failure::Error);
         }
-        Ok(Self { scope, text: text.to_string(), occurrence: occurrence as usize })
+        Ok(Self { scope, text: text.to_string(), occurrence: occurrence as usize, total: None })
+    }
+
+    /// The host's own count of matches (1 or more) to check against.
+    pub fn with_total(mut self, total: Option<u64>) -> Result<Self, Failure> {
+        if total.is_some_and(|t| t == 0 || t > MAX_OCCURRENCE) {
+            return Err(Failure::Error);
+        }
+        self.total = total.map(|t| t as usize);
+        Ok(self)
     }
 }
 
@@ -83,9 +103,71 @@ fn stories(doc: &Document, scope: Scope) -> Vec<StoryRef> {
     doc.parts.iter().filter(|(_, p)| p.kind == kind).map(|(id, _)| StoryRef::Part(*id)).collect()
 }
 
+/// Whether the host leaves this object out of a paragraph's text.
+fn uncounted(o: &InlineObject) -> bool {
+    matches!(
+        o,
+        InlineObject::BookmarkStart { .. }
+            | InlineObject::BookmarkEnd { .. }
+            | InlineObject::CommentStart { .. }
+            | InlineObject::CommentEnd { .. }
+            | InlineObject::PermStart { .. }
+            | InlineObject::PermEnd { .. }
+            | InlineObject::ControlStart { .. }
+            | InlineObject::ControlEnd { .. }
+            | InlineObject::Equation { .. }
+    )
+}
+
+/// A paragraph's text as the host counts it, with where each piece of it lies in the paragraph.
+struct Counted<'a> {
+    text: Cow<'a, str>,
+    /// (offset in `text`, offset in the paragraph, length) of each stretch kept; empty when
+    /// `text` is the paragraph's own.
+    pieces: Vec<(usize, usize, usize)>,
+}
+
+fn counted(p: &Paragraph) -> Counted<'_> {
+    if !p.objects.iter().any(uncounted) {
+        return Counted { text: Cow::Borrowed(&p.text), pieces: Vec::new() };
+    }
+    let (mut text, mut pieces, mut k) = (String::new(), Vec::<(usize, usize, usize)>::new(), 0);
+    for (at, c) in p.text.char_indices() {
+        if c == OBJ {
+            k += 1;
+            if p.objects.get(k - 1).is_some_and(uncounted) {
+                continue;
+            }
+        }
+        match pieces.last_mut() {
+            Some(last) if last.1 + last.2 == at => last.2 += c.len_utf8(),
+            _ => pieces.push((text.len(), at, c.len_utf8())),
+        }
+        text.push(c);
+    }
+    Counted { text: Cow::Owned(text), pieces }
+}
+
+impl Counted<'_> {
+    /// The paragraph's offsets of the counted range `start..end`.
+    fn original(&self, start: usize, end: usize) -> (usize, usize) {
+        if self.pieces.is_empty() {
+            return (start, end);
+        }
+        let from = self.pieces.iter().find(|(t, _, len)| start < t + len).map_or(start, |(t, o, _)| o + (start - t));
+        let to = self.pieces.iter().find(|(t, _, len)| end > *t && end <= t + len).map_or(end, |(t, o, _)| o + (end - t));
+        (from, to)
+    }
+}
+
 /// Matches of `text` in each paragraph of `story`, in document order.
 fn matches_in(doc: &Document, story: StoryRef, text: &str) -> usize {
-    doc.para_paths(story).iter().filter_map(|path| doc.para(story, path)).map(|p| p.text.matches(text).count()).sum()
+    doc.para_paths(story).iter().filter_map(|path| doc.para(story, path)).map(|p| counted(p).text.matches(text).count()).sum()
+}
+
+/// How many matches of `text` there are over `scope`.
+pub fn count(doc: &Document, scope: Scope, text: &str) -> usize {
+    stories(doc, scope).into_iter().map(|s| matches_in(doc, s, text)).sum()
 }
 
 /// The story holding the `n`-th match (from 1) of `text` over `scope`, and which match that is
@@ -102,12 +184,35 @@ pub fn locate(doc: &Document, scope: Scope, text: &str, n: usize) -> Option<(Sto
     None
 }
 
-/// Select the match and bring it into view. Nothing changes in the document.
+/// The paragraph and offsets of the `n`-th match (from 1) of `text` in `story`.
+fn place(doc: &Document, story: StoryRef, text: &str, n: usize) -> Option<(Path, usize, usize)> {
+    let mut seen = 0;
+    for path in doc.para_paths(story) {
+        let Some(p) = doc.para(story, &path) else { continue };
+        let c = counted(p);
+        for (at, _) in c.text.match_indices(text) {
+            seen += 1;
+            if seen == n {
+                let (from, to) = c.original(at, at + text.len());
+                return Some((path, from, to));
+            }
+        }
+    }
+    None
+}
+
+/// Select the match and bring it into view. Nothing changes in the document. A `total` that is not
+/// the document's count means the document is not the one the host looked at: not found.
 pub fn goto(app: &mut WordApp, req: &Goto) -> Result<(), Failure> {
-    let (story, n) = locate(&app.session.doc, req.scope, &req.text, req.occurrence).ok_or(Failure::NotFound)?;
-    let story = serde_json::to_value(story).map_err(|_| Failure::Error)?;
-    // `select.text` is on the host's allowed list; a finished command follows the caret.
-    app.run("select.text", serde_json::json!({ "text": req.text, "occurrence": n, "story": story })).map(|_| ()).map_err(|_| Failure::Error)
+    let doc = &app.session.doc;
+    if req.total.is_some_and(|t| t != count(doc, req.scope, &req.text)) {
+        return Err(Failure::NotFound);
+    }
+    let (story, n) = locate(doc, req.scope, &req.text, req.occurrence).ok_or(Failure::NotFound)?;
+    let (path, from, to) = place(doc, story, &req.text, n).ok_or(Failure::NotFound)?;
+    let pos = |off| serde_json::to_value(Pos { story, path: path.clone(), off }).map_err(|_| Failure::Error);
+    // `select.range` is on the host's allowed list; a finished command follows the caret.
+    app.run("select.range", serde_json::json!({ "anchor": pos(from)?, "focus": pos(to)? })).map(|_| ()).map_err(|_| Failure::Error)
 }
 
 #[cfg(test)]
@@ -314,5 +419,48 @@ mod tests {
         goto(&mut a, &Goto::new(Scope::Body, "{{name}}", 2).unwrap()).unwrap();
         assert_eq!(selected_paragraph(&a), "Plain {{name}}");
         assert_eq!(goto(&mut a, &Goto::new(Scope::Body, "{{name}}", 3).unwrap()), Err(Failure::NotFound));
+    }
+
+    #[test]
+    fn marks_the_host_does_not_count_are_left_out_and_the_whole_tag_is_selected() {
+        use wordcraft_doc::{Block, CharProps};
+        let mut a = app("x {{name}} y {{name}}");
+        if let Some(Block::Para(p)) = a.session.doc.body.get_mut(0).map(std::sync::Arc::make_mut) {
+            // A bookmark opens inside the first tag and closes at the end of the paragraph.
+            let end = p.text.len();
+            p.insert_object(end, InlineObject::BookmarkEnd { name: "b".into() }, &CharProps::default()).unwrap();
+            p.insert_object(5, InlineObject::BookmarkStart { name: "b".into() }, &CharProps::default()).unwrap();
+        }
+        let doc = &a.session.doc;
+        assert_eq!(count(doc, Scope::Body, "{{name}}"), 2, "the host counts two tags");
+        goto(&mut a, &Goto::new(Scope::Body, "{{name}}", 1).unwrap().with_total(Some(2)).unwrap()).unwrap();
+        assert_eq!(selected(&a).1, "{{n\u{fffc}ame}}", "the whole tag, mark inside it included");
+        assert_eq!(a.session.sel.anchor.off, 2);
+        goto(&mut a, &Goto::new(Scope::Body, "{{name}}", 2).unwrap().with_total(Some(2)).unwrap()).unwrap();
+        assert_eq!(selected(&a).1, "{{name}}");
+        assert_eq!(a.session.sel.anchor.off, "x {{n\u{fffc}ame}} y ".len());
+    }
+
+    #[test]
+    fn a_total_that_differs_selects_nothing() {
+        let mut a = app("{{a}} {{a}}\n{{a}}");
+        goto(&mut a, &Goto::new(Scope::Body, "{{a}}", 3).unwrap().with_total(Some(3)).unwrap()).unwrap();
+        let before = a.session.sel.clone();
+        for total in [2, 4] {
+            let g = Goto::new(Scope::Body, "{{a}}", 1).unwrap().with_total(Some(total)).unwrap();
+            assert_eq!(goto(&mut a, &g), Err(Failure::NotFound));
+            assert_eq!(a.session.sel, before, "nothing was selected");
+        }
+        assert_eq!(Goto::new(Scope::Body, "{{a}}", 1).unwrap().with_total(Some(0)), Err(Failure::Error));
+    }
+
+    #[test]
+    fn a_text_of_1000_utf16_units_is_accepted() {
+        // 1000 Korean syllables are 3000 bytes; 500 astral characters are 1000 units and 2000 bytes.
+        for text in ["가".repeat(1000), "\u{1F600}".repeat(500)] {
+            let mut a = app(&format!("a{text}b"));
+            goto(&mut a, &Goto::new(Scope::Body, &text, 1).unwrap().with_total(Some(1)).unwrap()).unwrap();
+            assert_eq!(selected(&a).1, text);
+        }
     }
 }

@@ -19,9 +19,12 @@
 //! - `wordcraft:table-failed` (to the parent): `{ id, error }` when it couldn't (bad rows, a
 //!   document that refuses the table).
 //! - `wordcraft:goto` (from the parent): `{ id, location }`, `location` `{ kind: "docx", story:
-//!   "body" | "header" | "footer", text, occurrence }`. It selects the `occurrence`-th (from 1)
+//!   "body" | "header" | "footer", text, occurrence, total? }`. It selects the `occurrence`-th (from 1)
 //!   match of `text` in the story and scrolls it into view (see `host_goto` for how matches
-//!   are counted). Nothing in the document changes.
+//!   are counted). `total`, if given, is how many matches the parent counted in the story; when
+//!   the document has another number nothing is selected and the answer is `not-found`. Nothing
+//!   in the document changes. A document still opening answers `not-found`; with 16 requests
+//!   waiting the oldest is dropped and answered `error`.
 //! - `wordcraft:goto-done` (to the parent): `{ id }` when it did.
 //! - `wordcraft:goto-failed` (to the parent): `{ id, reason }`, reason `not-found`,
 //!   `unsupported` (a location of another kind or story) or `error` (a malformed request).
@@ -233,11 +236,13 @@ impl Bridge {
             };
             match done {
                 Ok(()) => self.send(&[("type", "wordcraft:goto-done".into()), ("id", id.as_str().into())]),
-                Err(failure) => {
-                    self.send(&[("type", "wordcraft:goto-failed".into()), ("id", id.as_str().into()), ("reason", failure.as_str().into())])
-                }
+                Err(failure) => self.goto_failed(&id, failure),
             };
         }
+    }
+
+    fn goto_failed(&self, id: &str, failure: Failure) -> bool {
+        self.send(&[("type", "wordcraft:goto-failed".into()), ("id", id.into()), ("reason", failure.as_str().into())])
     }
 
     /// Before each pass: answer the parent's byte requests. A `save` runs File › Save, so the
@@ -403,8 +408,15 @@ impl Bridge {
                 }
                 Some("wordcraft:goto") => {
                     let Some(id) = string(&data, "id").filter(|id| !id.is_empty() && id.len() <= MAX_ID_BYTES) else { return };
-                    if gotos.borrow().len() < MAX_PENDING_GOTOS {
-                        gotos.borrow_mut().push(GotoRequest { id, goto: goto_location(&data) });
+                    // A full queue drops its oldest request, which hears `error`.
+                    let dropped = {
+                        let mut queue = gotos.borrow_mut();
+                        let dropped = (queue.len() >= MAX_PENDING_GOTOS).then(|| queue.remove(0));
+                        queue.push(GotoRequest { id, goto: goto_location(&data) });
+                        dropped
+                    };
+                    if let Some(old) = dropped {
+                        bridge.goto_failed(&old.id, Failure::Error);
                     }
                 }
                 Some("wordcraft:request-bytes") => {
@@ -476,8 +488,13 @@ fn goto_location(data: &JsValue) -> Result<Goto, Failure> {
         .filter(|t| t.dyn_ref::<js_sys::JsString>().is_some_and(|s| s.length() as usize <= host_goto::MAX_TEXT_BYTES))
         .and_then(|t| t.as_string());
     let occurrence = get(&location, "occurrence").and_then(|o| o.as_f64()).filter(|o| o.fract() == 0.0 && *o >= 1.0).map(|o| o as u64);
+    // `total` (optional) is how many matches the host counted in the story.
+    let total = match get(&location, "total").filter(|t| !t.is_undefined() && !t.is_null()) {
+        None => None,
+        Some(t) => Some(t.as_f64().filter(|t| t.fract() == 0.0 && *t >= 1.0).map(|t| t as u64).ok_or(Failure::Error)?),
+    };
     match (text, occurrence) {
-        (Some(text), Some(occurrence)) => Goto::new(scope, &text, occurrence),
+        (Some(text), Some(occurrence)) => Goto::new(scope, &text, occurrence)?.with_total(total),
         _ => Err(Failure::Error),
     }
 }
