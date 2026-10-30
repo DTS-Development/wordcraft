@@ -216,4 +216,102 @@ mod tests {
         goto(&mut a, &Goto::new(Scope::Body, "{{h}}", 1).unwrap()).unwrap();
         assert_eq!(selected(&a).0, StoryRef::Body);
     }
+
+    /// The shared fixture of the host's tag check (`jump.docx`, `expected.json`) and a file whose
+    /// header parts are named against their first reference (`order.docx`).
+    const JUMP_DOCX: &[u8] = include_bytes!("../tests/fixtures/tag-jump/jump.docx");
+    const JUMP_EXPECTED: &str = include_str!("../tests/fixtures/tag-jump/expected.json");
+    const ORDER_DOCX: &[u8] = include_bytes!("../tests/fixtures/tag-jump/order.docx");
+
+    fn open(bytes: &[u8]) -> WordApp {
+        let mut a = app("");
+        let data = wordcraft_engine::cmd::insert::base64_encode(bytes);
+        a.run("file.open", serde_json::json!({"path": "fixture.docx", "data": data})).unwrap();
+        a
+    }
+
+    /// The text of every paragraph of `scope`, in the order the count runs over them.
+    fn paragraphs(a: &WordApp, scope: Scope) -> Vec<String> {
+        let doc = &a.session.doc;
+        stories(doc, scope)
+            .into_iter()
+            .flat_map(|st| doc.para_paths(st).into_iter().filter_map(move |p| doc.para(st, &p).map(|p| p.text.clone())))
+            .collect()
+    }
+
+    fn location(v: &serde_json::Value) -> Goto {
+        let scope = Scope::parse(v["story"].as_str().unwrap()).unwrap();
+        Goto::new(scope, v["text"].as_str().unwrap(), v["occurrence"].as_u64().unwrap()).unwrap()
+    }
+
+    /// The paragraph the selection is in.
+    fn selected_paragraph(a: &WordApp) -> String {
+        a.session.doc.para_at(&a.session.sel.anchor).expect("a paragraph").text.clone()
+    }
+
+    #[test]
+    fn the_shared_fixture_counts_the_paragraphs_the_host_expects() {
+        let a = open(JUMP_DOCX);
+        let expected: serde_json::Value = serde_json::from_str(JUMP_EXPECTED).unwrap();
+        for (name, scope) in [("body", Scope::Body), ("header", Scope::Header), ("footer", Scope::Footer)] {
+            let want: Vec<String> = expected["docx"]["scopes"][name].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect();
+            assert_eq!(paragraphs(&a, scope), want, "{name} paragraphs");
+        }
+    }
+
+    #[test]
+    fn the_shared_fixture_locations_point_where_the_host_expects() {
+        let mut a = open(JUMP_DOCX);
+        let expected: serde_json::Value = serde_json::from_str(JUMP_EXPECTED).unwrap();
+        let docx = &expected["docx"];
+        let mut places: Vec<(serde_json::Value, Option<String>)> =
+            docx["probes"].as_array().unwrap().iter().map(|p| (p["location"].clone(), Some(p["paragraph"].as_str().unwrap().to_string()))).collect();
+        for item in docx["errors"].as_array().unwrap().iter().chain(docx["warnings"].as_array().unwrap()) {
+            places.push((item["location"].clone(), None));
+        }
+        assert!(places.len() >= 14);
+        for (loc, paragraph) in places {
+            let g = location(&loc);
+            goto(&mut a, &g).unwrap_or_else(|e| panic!("{loc}: {e:?}"));
+            assert_eq!(selected(&a).1, g.text, "{loc}");
+            if let Some(paragraph) = paragraph {
+                assert_eq!(selected_paragraph(&a), paragraph, "{loc}");
+            }
+        }
+        // One past the last match is not found.
+        assert_eq!(goto(&mut a, &Goto::new(Scope::Body, "{{name}}", 4).unwrap()), Err(Failure::NotFound));
+    }
+
+    #[test]
+    fn header_parts_go_by_first_reference_not_by_file_number() {
+        let mut a = open(ORDER_DOCX);
+        // The first section refers to header2/footer2 and the last to header1/footer1.
+        assert_eq!(paragraphs(&a, Scope::Header), ["Header2 {{h}}", "Header1 {{h}}"]);
+        assert_eq!(paragraphs(&a, Scope::Footer), ["Footer2 {{h}}", "Footer1 {{h}}"]);
+        for (scope, n, want) in [
+            (Scope::Header, 1, "Header2 {{h}}"),
+            (Scope::Header, 2, "Header1 {{h}}"),
+            (Scope::Footer, 1, "Footer2 {{h}}"),
+            (Scope::Footer, 2, "Footer1 {{h}}"),
+        ] {
+            goto(&mut a, &Goto::new(scope, "{{h}}", n).unwrap()).unwrap();
+            assert_eq!(selected_paragraph(&a), want);
+        }
+    }
+
+    /// A field in the middle of a tag: the host's plain text has the field's result in the tag
+    /// (`{{name}}`), but the model keeps only an object mark there (`{{na\u{fffc}}}`), so the
+    /// fork does not count that paragraph. Every later occurrence is then one lower here than for
+    /// the host. (A drawing with no picture data is dropped by the reader and splits nothing.)
+    #[test]
+    fn a_tag_split_by_a_field_is_not_counted() {
+        let mut a = open(ORDER_DOCX);
+        assert_eq!(paragraphs(&a, Scope::Body), ["Sec1 {{h}}", "End1", "Img {{name}}", "Fld {{na\u{fffc}}}", "Plain {{name}}"]);
+        goto(&mut a, &Goto::new(Scope::Body, "{{name}}", 1).unwrap()).unwrap();
+        assert_eq!(selected_paragraph(&a), "Img {{name}}");
+        // The host counts the field paragraph as the 2nd and "Plain" as the 3rd.
+        goto(&mut a, &Goto::new(Scope::Body, "{{name}}", 2).unwrap()).unwrap();
+        assert_eq!(selected_paragraph(&a), "Plain {{name}}");
+        assert_eq!(goto(&mut a, &Goto::new(Scope::Body, "{{name}}", 3).unwrap()), Err(Failure::NotFound));
+    }
 }
