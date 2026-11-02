@@ -161,6 +161,7 @@ fn drop_cap_ui(app: &mut WordApp, ui: &mut Ui, f: &mut DropCapForm) -> bool {
     ui.add_space(6.0);
     ui.label(egui::RichText::new(tl!("Options")).font(semibold(12.5)));
     let fams = app.previews.families();
+    let fams = crate::previews::Previews::with_current(fams, &app.previews.font_shown(&f.font));
     let preview = app.previews.font_preview_fn();
     let unit = crate::options::unit();
     ui.add_enabled_ui(f.position != "none", |ui| {

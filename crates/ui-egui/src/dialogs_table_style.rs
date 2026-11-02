@@ -502,6 +502,10 @@ pub fn body(app: &mut WordApp, ui: &mut Ui, f: Form) -> bool {
     ui.separator();
     let theme = app.session.doc.settings.theme_colors.clone();
     let fams = app.previews.families();
+    let fams = match regions.get(*region) {
+        Some(r) => crate::previews::Previews::with_current(fams, &app.previews.font_shown(&r.font)),
+        None => fams,
+    };
     let preview_fn = app.previews.font_preview_fn();
     if let Some(r) = regions.get_mut(*region) {
         ui.label(egui::RichText::new(tl!("Formatting")).font(crate::theme::semibold(12.5)));
