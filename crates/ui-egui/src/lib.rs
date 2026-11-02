@@ -8107,7 +8107,7 @@ mod tests {
         // font has one.
         if wordcraft_fonts::FontDb::global().is_loaded("NanumGothic") {
             for shown in ["NanumGothic", "NanumMyeongjo", "NanumGothicCoding", "Black Han Sans", "Pretendard"] {
-                assert!(has(&fams, shown) || a.previews.font_shown(shown) != shown, "{shown} is listed");
+                assert!(has(&fams, &a.previews.font_shown(shown)), "{shown} is listed");
             }
         }
         // The font in use stays in the list even when hidden; a listed one is not doubled.
@@ -8115,6 +8115,10 @@ mod tests {
         assert!(with[0] == "Source Sans 3" && with.len() == fams.len() + 1, "the selection goes on top");
         assert_eq!(crate::previews::Previews::with_current(fams.clone(), &fams[0]).len(), fams.len());
         assert_eq!(crate::previews::Previews::with_current(fams.clone(), "").len(), fams.len());
+        // A document font the list never had (Calibri, drawn with Carlito) is on top too: the font
+        // dialogs, the style dialog and the ribbon all pass the font in use through here.
+        assert!(!has(&fams, "Calibri"));
+        assert_eq!(crate::previews::Previews::with_current(fams.clone(), "Calibri")[0], "Calibri");
     }
 
     /// Add Font… (#582), web: the picker asks for fonts, the picked file arrives through the

@@ -1827,6 +1827,7 @@ fn body(app: &mut WordApp, ui: &mut Ui, d: &mut Dialog) -> bool {
                 }
                 ui.label(if *asian { tl!("Latin text font:") } else { tl!("Font:") });
                 let fams = app.previews.families();
+                let fams = crate::previews::Previews::with_current(fams, &app.previews.font_shown(font));
                 if let Some(f) = crate::widgets::font_combo(ui, "fontdlg_font", 220.0, font, &fams, Some(&*prev)) {
                     if f == crate::widgets::ADD_FONT {
                         let _ = app.run("font.add", json!({}));
@@ -2545,6 +2546,7 @@ fn body(app: &mut WordApp, ui: &mut Ui, d: &mut Dialog) -> bool {
                 ui.label(tl!("Font:"));
                 let shown = app.previews.font_shown(font);
                 let fams = app.previews.families();
+                let fams = crate::previews::Previews::with_current(fams, &shown);
                 let prev = app.previews.font_preview_fn();
                 if let Some(f) = crate::widgets::font_combo(ui, "ms_font", 220.0, &shown, &fams, Some(&*prev)) {
                     if f == crate::widgets::ADD_FONT {
