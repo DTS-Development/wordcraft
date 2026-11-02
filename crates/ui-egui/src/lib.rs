@@ -8112,7 +8112,7 @@ mod tests {
         }
         // The font in use stays in the list even when hidden; a listed one is not doubled.
         let with = crate::previews::Previews::with_current(fams.clone(), "Source Sans 3");
-        assert!(has(&with, "Source Sans 3") && with.len() == fams.len() + 1);
+        assert!(with[0] == "Source Sans 3" && with.len() == fams.len() + 1, "the selection goes on top");
         assert_eq!(crate::previews::Previews::with_current(fams.clone(), &fams[0]).len(), fams.len());
         assert_eq!(crate::previews::Previews::with_current(fams.clone(), "").len(), fams.len());
     }
@@ -8121,7 +8121,7 @@ mod tests {
     /// inbox and is added, listed in the font menu and kept in the browser; removing it forgets it.
     #[test]
     fn a_font_picked_on_the_web_is_added_listed_and_kept() {
-        const FAMILY: &str = "Uifont Sans 3";
+        const FAMILY: &str = "Aaaaaa Sans 3";
         let mut font = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/fonts/SourceSans3-Regular.ttf")).unwrap();
         let utf16 = |s: &str| s.encode_utf16().flat_map(u16::to_be_bytes).collect::<Vec<u8>>();
         for (from, to) in [(utf16("Source Sans 3"), utf16(FAMILY)), (b"Source Sans 3".to_vec(), FAMILY.as_bytes().to_vec())] {
@@ -8149,6 +8149,13 @@ mod tests {
         a.drain_inbox();
         a.watch_fonts(&ctx);
         assert!(a.previews.families().iter().any(|f| f == FAMILY), "listed in the font menu at once");
+        // The PPM menu lists run-time fonts after the bundled ones, though FAMILY sorts first.
+        #[cfg(feature = "ppm-host")]
+        {
+            let fams = a.previews.families();
+            let at = |n: &str| fams.iter().position(|f| f == n).unwrap();
+            assert!(at("Aptos Display") < at(FAMILY));
+        }
         assert_eq!(*kept.borrow(), vec![("Uifont-Regular.ttf".to_string(), font.len())]);
         assert!(body_text(&a).contains(UNSAVED), "the document stays open");
         // Junk named like a font is refused, and nothing is kept.

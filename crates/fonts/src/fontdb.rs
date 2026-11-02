@@ -1110,6 +1110,14 @@ impl FontDb {
             .collect()
     }
 
+    /// Families with a face added at run time or embedded in a document (not one of the build's
+    /// own fonts), lowercase, with their legacy names.
+    pub fn runtime_families(&self) -> std::collections::HashSet<String> {
+        let faces = self.read_faces();
+        let owned = faces.iter().filter(|f| matches!(f.bytes, FontBytes::Owned(_)));
+        owned.flat_map(|f| [f.family.to_lowercase(), f.legacy_family.to_lowercase()]).collect()
+    }
+
     /// [`FontDb::families_in`] without the families named in `hide` (lowercase English names):
     /// the font menu of a build that lists only fonts that draw Hangul.
     pub fn families_in_except(&self, lang: &str, hide: &std::collections::HashSet<String>) -> Vec<String> {

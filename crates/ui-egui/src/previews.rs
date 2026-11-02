@@ -177,6 +177,14 @@ impl Previews {
             f.sort_by_key(|a| a.to_lowercase());
             f.dedup();
             let names = db.localized_names(lang);
+            // The PPM build lists the bundled Hangul fonts first, then the fonts brought in at run
+            // time (admin uploads, document-embedded), each part A-Z.
+            #[cfg(feature = "ppm-host")]
+            {
+                let runtime = db.runtime_families();
+                let english = |shown: &str| names.iter().find(|(_, l)| l == shown).map_or_else(|| shown.to_lowercase(), |(e, _)| e.to_lowercase());
+                f.sort_by_key(|x| runtime.contains(&english(x)));
+            }
             self.local_names = names.iter().map(|(e, l)| (e.to_lowercase(), l.clone())).collect();
             self.english_names = names.into_iter().map(|(e, l)| (l, e)).collect();
             self.families = Some((lang, f));
@@ -186,13 +194,12 @@ impl Previews {
     }
 
     /// `fams` with the font in use (`shown`, as the font box names it) added when the PPM build's
-    /// list hides it, so the selection stays in the list. Other builds list every font already.
+    /// list hides it, so the selection stays in the list, on top. Other builds list every font already.
     #[cfg_attr(not(feature = "ppm-host"), allow(unused_mut))]
     pub fn with_current(mut fams: Vec<String>, shown: &str) -> Vec<String> {
         #[cfg(feature = "ppm-host")]
         if !shown.is_empty() && !fams.iter().any(|f| f.eq_ignore_ascii_case(shown)) {
-            fams.push(shown.to_string());
-            fams.sort_by_key(|a| a.to_lowercase());
+            fams.insert(0, shown.to_string());
         }
         #[cfg(not(feature = "ppm-host"))]
         let _ = shown;
