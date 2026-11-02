@@ -1088,6 +1088,51 @@ impl FontDb {
         v
     }
 
+    /// Bundled families (the build's own fonts, not ones added at run time or embedded in a
+    /// document) none of whose faces draws Hangul U+AC00, lowercase, with their legacy names: what
+    /// the PPM font menu hides. Their files stay loaded for Office name substitution and the UI.
+    pub fn bundled_without_hangul(&self) -> std::collections::HashSet<String> {
+        let faces = self.read_faces();
+        let owned = |name: &str| {
+            faces.iter().any(|f| {
+                matches!(f.bytes, FontBytes::Owned(_)) && (f.family.eq_ignore_ascii_case(name) || f.legacy_family.eq_ignore_ascii_case(name))
+            })
+        };
+        let hangul = |name: &str| {
+            faces.iter().any(|f| (f.family.eq_ignore_ascii_case(name) || f.legacy_family.eq_ignore_ascii_case(name)) && f.covers('\u{AC00}'))
+        };
+        faces
+            .iter()
+            .filter(|f| matches!(f.bytes, FontBytes::Static(_)))
+            .flat_map(|f| [f.family.as_str(), f.legacy_family.as_str()])
+            .filter(|n| !hangul(n) && !owned(n))
+            .map(str::to_lowercase)
+            .collect()
+    }
+
+    /// Families with a face added at run time or embedded in a document (not one of the build's
+    /// own fonts), lowercase, with their legacy names.
+    pub fn runtime_families(&self) -> std::collections::HashSet<String> {
+        let faces = self.read_faces();
+        let owned = faces.iter().filter(|f| matches!(f.bytes, FontBytes::Owned(_)));
+        owned.flat_map(|f| [f.family.to_lowercase(), f.legacy_family.to_lowercase()]).collect()
+    }
+
+    /// [`FontDb::families_in`] without the families named in `hide` (lowercase English names):
+    /// the font menu of a build that lists only fonts that draw Hangul.
+    pub fn families_in_except(&self, lang: &str, hide: &std::collections::HashSet<String>) -> Vec<String> {
+        let local: HashMap<String, String> = self.localized_names(lang).into_iter().map(|(e, l)| (e.to_lowercase(), l)).collect();
+        let mut v: Vec<String> = self
+            .families()
+            .into_iter()
+            .filter(|f| !hide.contains(&f.to_lowercase()))
+            .map(|f| local.get(&f.to_lowercase()).cloned().unwrap_or(f))
+            .collect();
+        v.sort_by_key(|a| a.to_lowercase());
+        v.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+        v
+    }
+
     /// The English family a localized family name stands for (宋体 → SimSun), when no face has
     /// `family` as its English name. `None` for names no font has.
     pub fn english_family(&self, family: &str) -> Option<String> {

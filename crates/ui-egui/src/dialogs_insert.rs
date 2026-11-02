@@ -841,7 +841,9 @@ fn symbol_ui(app: &mut WordApp, ui: &mut Ui, f: &mut SymbolForm) -> bool {
             ui.label(tl!("Font:"));
             let normal = tl!("(normal text)").to_string();
             let mut items = vec![normal.clone()];
-            items.extend(app.previews.families());
+            let fams = app.previews.families();
+            let shown_font = app.previews.font_shown(&f.font);
+            items.extend(crate::previews::Previews::with_current(fams, &shown_font));
             let shown = if f.font.is_empty() { normal.clone() } else { f.font.clone() };
             let pf = app.previews.font_preview_fn();
             let normal_row = normal.clone();
