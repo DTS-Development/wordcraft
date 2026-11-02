@@ -161,8 +161,15 @@ impl Previews {
         if self.families.as_ref().is_none_or(|(l, _)| *l != lang) || self.font_gen != generation {
             self.font_gen = generation;
             let db = wordcraft_fonts::FontDb::global();
+            // The PPM build lists only fonts that draw Hangul: the bundled Latin-only ones (still
+            // loaded for Office names and the UI) stay out. Fonts added at run time or embedded in a
+            // document are never hidden. The theme font rows (Aptos, Aptos Display) stay.
+            #[cfg(feature = "ppm-host")]
+            let mut f: Vec<String> = db.families_in_except(lang, &db.bundled_without_hangul()).into_iter().filter(|f| !f.starts_with('.')).collect();
+            #[cfg(not(feature = "ppm-host"))]
             let mut f: Vec<String> = db.families_in(lang).into_iter().filter(|f| !f.starts_with('.')).collect();
-            for w in [wordcraft_doc::styles::BODY_FONT, wordcraft_doc::styles::HEADING_FONT] {
+            let theme = [wordcraft_doc::styles::BODY_FONT, wordcraft_doc::styles::HEADING_FONT];
+            for w in theme {
                 if !f.iter().any(|x| x == w) {
                     f.push(w.to_string());
                 }
@@ -170,12 +177,33 @@ impl Previews {
             f.sort_by_key(|a| a.to_lowercase());
             f.dedup();
             let names = db.localized_names(lang);
+            // The PPM build lists the bundled Hangul fonts first, then the fonts brought in at run
+            // time (admin uploads, document-embedded), each part A-Z.
+            #[cfg(feature = "ppm-host")]
+            {
+                let runtime = db.runtime_families();
+                let english = |shown: &str| names.iter().find(|(_, l)| l == shown).map_or_else(|| shown.to_lowercase(), |(e, _)| e.to_lowercase());
+                f.sort_by_key(|x| runtime.contains(&english(x)));
+            }
             self.local_names = names.iter().map(|(e, l)| (e.to_lowercase(), l.clone())).collect();
             self.english_names = names.into_iter().map(|(e, l)| (l, e)).collect();
             self.families = Some((lang, f));
             self.east_asian = None;
         }
         self.families.as_ref().map(|(_, f)| f.clone()).unwrap_or_default()
+    }
+
+    /// `fams` with the font in use (`shown`, as the font box names it) added when the PPM build's
+    /// list hides it, so the selection stays in the list, on top. Other builds list every font already.
+    #[cfg_attr(not(feature = "ppm-host"), allow(unused_mut))]
+    pub fn with_current(mut fams: Vec<String>, shown: &str) -> Vec<String> {
+        #[cfg(feature = "ppm-host")]
+        if !shown.is_empty() && !fams.iter().any(|f| f.eq_ignore_ascii_case(shown)) {
+            fams.insert(0, shown.to_string());
+        }
+        #[cfg(not(feature = "ppm-host"))]
+        let _ = shown;
+        fams
     }
 
     /// The Font dialog's Asian text font list: the installed Chinese, Japanese and Korean fonts,
@@ -670,6 +698,33 @@ pub fn table_style_tile(ui: &mut Ui, app: &mut WordApp, style: &str) -> Response
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A Korean interface lists the Korean set by Korean names, and a name picked from the list
+    /// is stored as the English family. Skipped (printed) without the PPM font set.
+    #[test]
+    fn korean_font_names_are_shown_and_stored_as_english_families() {
+        if !wordcraft_fonts::FontDb::global().is_loaded("NanumGothic") {
+            eprintln!("skipped: built without the PPM font set (CRAFT_FONTS_DIR)");
+            return;
+        }
+        crate::i18n::set_current(crate::i18n::Lang::from_code("ko").unwrap());
+        let mut p = Previews::default();
+        let fams = p.families();
+        for (en, shown) in
+            [("NanumGothic", "나눔고딕"), ("NanumMyeongjo", "나눔명조"), ("NanumGothicCoding", "나눔고딕코딩"), ("Black Han Sans", "검은고딕")]
+        {
+            assert!(fams.iter().any(|f| f == shown), "{shown} is listed");
+            assert_eq!(p.font_shown(en), shown);
+            // A native test also sees installed fonts, whose English names may be spelled with
+            // spaces ("Nanum Gothic"); the web build has only the bundled set.
+            let stored = p.font_stored(shown);
+            assert_eq!(stored.replace(' ', ""), en.replace(' ', ""), "{shown} is stored as an English family");
+            assert!(stored.is_ascii());
+        }
+        assert!(fams.iter().any(|f| f == "Pretendard"));
+        assert_eq!((p.font_shown("Pretendard"), p.font_stored("Pretendard")), ("Pretendard".to_string(), "Pretendard".to_string()));
+        crate::i18n::set_current(crate::i18n::Lang::EN);
+    }
 
     /// #848: each trip through the Font box loaded every family it showed, for good. Entries are
     /// now drawn with a face read for the preview alone: installed families stay unloaded.
