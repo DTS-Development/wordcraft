@@ -162,16 +162,13 @@ impl Previews {
             self.font_gen = generation;
             let db = wordcraft_fonts::FontDb::global();
             // The PPM build lists only fonts that draw Hangul: the bundled Latin-only ones (still
-            // loaded for Office names and the UI) and the theme names (Aptos…) stay out. Fonts
-            // added at run time or embedded in a document are never hidden.
+            // loaded for Office names and the UI) stay out. Fonts added at run time or embedded in a
+            // document are never hidden. The theme font rows (Aptos, Aptos Display) stay.
             #[cfg(feature = "ppm-host")]
-            let (mut f, theme): (Vec<String>, &[&str]) =
-                (db.families_in_except(lang, &db.bundled_without_hangul()).into_iter().filter(|f| !f.starts_with('.')).collect(), &[]);
+            let mut f: Vec<String> = db.families_in_except(lang, &db.bundled_without_hangul()).into_iter().filter(|f| !f.starts_with('.')).collect();
             #[cfg(not(feature = "ppm-host"))]
-            let (mut f, theme): (Vec<String>, &[&str]) = (
-                db.families_in(lang).into_iter().filter(|f| !f.starts_with('.')).collect(),
-                &[wordcraft_doc::styles::BODY_FONT, wordcraft_doc::styles::HEADING_FONT],
-            );
+            let mut f: Vec<String> = db.families_in(lang).into_iter().filter(|f| !f.starts_with('.')).collect();
+            let theme = [wordcraft_doc::styles::BODY_FONT, wordcraft_doc::styles::HEADING_FONT];
             for w in theme {
                 if !f.iter().any(|x| x == w) {
                     f.push(w.to_string());
