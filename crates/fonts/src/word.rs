@@ -24,7 +24,7 @@ pub struct Resolved {
 /// The PPM build's name mapping (`ppm/font_mapping`): Office and Korean document fonts map onto the
 /// bundled Office-compatible set, matched case-insensitively against an exact list. Other names
 /// are Carlito, except the symbol fonts and the non-Latin scripts' names (Thai, Hebrew, Persian…),
-/// which keep their chains; Hangul glyphs reach NanumGothic through the per-glyph fallback.
+/// which keep their chains; Korean names map to the bundled Korean set (NanumGothic, NanumMyeongjo, NanumGothicCoding, Black Han Sans), each chain ending in NanumGothic.
 #[cfg(feature = "ppm-host")]
 const PPM_CARLITO: &[&str] = &["Carlito", "Liberation Sans", "Source Sans 3"];
 
@@ -36,6 +36,9 @@ fn ppm_office_chain(f: &str) -> Option<&'static [&'static str]> {
     const SERIF: &[&str] = &["Liberation Serif", "Carlito", "Source Sans 3"];
     const MONO: &[&str] = &["Liberation Mono", "Carlito", "Source Sans 3"];
     const KOREAN: &[&str] = &["NanumGothic", "Carlito", "Liberation Sans", "Source Sans 3"];
+    const MYEONGJO: &[&str] = &["NanumMyeongjo", "NanumGothic", "Carlito", "Liberation Sans", "Source Sans 3"];
+    const CODING: &[&str] = &["NanumGothicCoding", "NanumGothic", "Carlito", "Liberation Sans", "Source Sans 3"];
+    const HEADLINE: &[&str] = &["Black Han Sans", "NanumGothic", "Carlito", "Liberation Sans", "Source Sans 3"];
     const INTER: &[&str] = &["Inter", "Carlito", "Source Sans 3"];
     Some(match f {
         "calibri" | "calibri light" | "aptos" | "aptos display" | "aptos narrow" | "aptos light" | "aptos semibold" | "segoe ui"
@@ -45,38 +48,43 @@ fn ppm_office_chain(f: &str) -> Option<&'static [&'static str]> {
         "times" | "times new roman" => SERIF,
         "courier" | "courier new" | "consolas" | "lucida console" => MONO,
         "inter" => INTER,
+        // 고딕 → NanumGothic. noto·apple 이름은 예전부터 여기였다.
         "맑은 고딕"
         | "malgun gothic"
         | "굴림"
         | "gulim"
-        | "굴림체"
-        | "gulimche"
         | "새굴림"
         | "new gulim"
         | "돋움"
         | "dotum"
-        | "돋움체"
-        | "dotumche"
-        | "바탕"
-        | "batang"
-        | "바탕체"
-        | "batangche"
-        | "궁서"
-        | "gungsuh"
-        | "궁서체"
-        | "gungsuhche"
-        | "함초롬바탕"
-        | "hcr batang"
         | "함초롬돋움"
         | "hcr dotum"
         | "나눔고딕"
         | "nanumgothic"
-        | "나눔명조"
-        | "nanummyeongjo"
+        | "hy중고딕"
+        | "hygothic-medium"
         | "noto sans kr"
         | "noto sans cjk kr"
         | "noto serif kr"
         | "apple sd gothic neo" => KOREAN,
+        // 명조 → NanumMyeongjo, 없으면 NanumGothic(한글 보장).
+        "바탕"
+        | "batang"
+        | "궁서"
+        | "gungsuh"
+        | "함초롬바탕"
+        | "hcr batang"
+        | "나눔명조"
+        | "nanummyeongjo"
+        | "hy신명조"
+        | "hysinmyeongjo-medium"
+        | "hy견명조"
+        | "hymyeongjo-extra"
+        | "한컴바탕" => MYEONGJO,
+        // 고정폭(글자 칸 고정) 이름 → NanumGothicCoding.
+        "굴림체" | "gulimche" | "돋움체" | "dotumche" | "바탕체" | "batangche" | "궁서체" | "gungsuhche" => CODING,
+        // 제목용 굵은 고딕 → Black Han Sans.
+        "hy헤드라인m" | "hyheadline-medium" | "hy견고딕" | "hygothic-extra" => HEADLINE,
         _ => return None,
     })
 }
@@ -540,43 +548,57 @@ mod tests {
         for f in ["Cordia New", "David", "B Yekan", "B Nazanin"] {
             assert_ne!(first(f), "Carlito", "{f}");
         }
-        for f in [
-            "맑은 고딕",
-            "Malgun Gothic",
-            "굴림",
-            "Gulim",
-            "굴림체",
-            "GulimChe",
-            "새굴림",
-            "New Gulim",
-            "돋움",
-            "Dotum",
-            "돋움체",
-            "DotumChe",
-            "바탕",
-            "Batang",
-            "바탕체",
-            "BatangChe",
-            "궁서",
-            "Gungsuh",
-            "궁서체",
-            "GungsuhChe",
-            "함초롬바탕",
-            "HCR Batang",
-            "함초롬돋움",
-            "HCR Dotum",
-            "나눔고딕",
-            "NanumGothic",
-            "나눔명조",
-            "NanumMyeongjo",
-            "Noto Sans KR",
-            "Noto Sans CJK KR",
-            "Noto Serif KR",
-            "Apple SD Gothic Neo",
-        ] {
-            assert_eq!(first(f), "NanumGothic", "{f}");
-            assert!(substitutes(f).contains(&"Carlito"), "{f} keeps a Latin fallback");
-        }
+        let chain = |names: &[&str], head: &[&str]| {
+            for f in names {
+                let c = substitutes(f);
+                assert_eq!(&c[..head.len()], head, "{f}");
+                // 첫 글꼴이 없어도 한글은 NanumGothic이 받고, 라틴 대체가 이어진다.
+                assert!(c.contains(&"NanumGothic") && c.contains(&"Carlito"), "{f}");
+            }
+        };
+        chain(
+            &[
+                "맑은 고딕",
+                "Malgun Gothic",
+                "굴림",
+                "Gulim",
+                "새굴림",
+                "New Gulim",
+                "돋움",
+                "Dotum",
+                "함초롬돋움",
+                "HCR Dotum",
+                "나눔고딕",
+                "NanumGothic",
+                "HY중고딕",
+                "HYGothic-Medium",
+                "Noto Sans KR",
+                "Noto Sans CJK KR",
+                "Noto Serif KR",
+                "Apple SD Gothic Neo",
+            ],
+            &["NanumGothic"],
+        );
+        chain(
+            &[
+                "바탕",
+                "Batang",
+                "궁서",
+                "Gungsuh",
+                "함초롬바탕",
+                "HCR Batang",
+                "나눔명조",
+                "NanumMyeongjo",
+                "HY신명조",
+                "HYSinMyeongJo-Medium",
+                "HY견명조",
+                "HYMyeongJo-Extra",
+                "한컴바탕",
+            ],
+            &["NanumMyeongjo", "NanumGothic"],
+        );
+        chain(&["굴림체", "GulimChe", "돋움체", "DotumChe", "바탕체", "BatangChe", "궁서체", "GungsuhChe"], &["NanumGothicCoding", "NanumGothic"]);
+        chain(&["HY헤드라인M", "HYHeadLine-Medium", "HY견고딕", "HYGothic-Extra"], &["Black Han Sans", "NanumGothic"]);
     }
 
     /// Other builds keep the old chains: the Korean names are not special there.
@@ -608,12 +630,29 @@ mod tests {
             ("Times New Roman", "Liberation Serif"),
             ("Consolas", "Liberation Mono"),
             ("맑은 고딕", "NanumGothic"),
-            ("굴림체", "NanumGothic"),
+            ("굴림체", "NanumGothicCoding"),
             ("나눔고딕", "NanumGothic"),
+            ("바탕", "NanumMyeongjo"),
+            ("HY헤드라인M", "Black Han Sans"),
         ];
         for (name, family) in want {
             assert!(db.has_family(family), "{family} is not bundled");
             assert_eq!(substitute(&db, name), Some(family), "{name}");
+        }
+        // 한글 글꼴 세트: 글꼴마다 Regular(Black Han Sans는 그것만)가 읽히고, 한글 '가'를 그린다.
+        for (family, styles) in [
+            ("NanumGothic", &["Regular", "Bold"][..]),
+            ("NanumMyeongjo", &["Regular", "Bold"]),
+            ("NanumGothicCoding", &["Regular", "Bold"]),
+            ("Pretendard", &["Regular", "Bold"]),
+            ("Black Han Sans", &["Regular"]),
+        ] {
+            assert!(db.has_family(family), "{family} is not bundled");
+            for style in styles {
+                let f = db.face(family, style);
+                assert_eq!((f.family.as_str(), f.style.as_str()), (family, *style));
+                assert!(f.covers('가'), "{family} {style} draws Hangul");
+            }
         }
         for family in ["Carlito", "Caladea", "Liberation Sans", "Liberation Serif", "Liberation Mono"] {
             for (style, bold, italic) in [("Regular", false, false), ("Bold", true, false), ("Italic", false, true), ("Bold Italic", true, true)] {
@@ -622,6 +661,50 @@ mod tests {
                 assert_eq!((f.weight >= 600.0, f.italic), (bold, italic), "{family} {style}");
             }
         }
+    }
+
+    /// The menu's Hangul test reads the font files: Latin-only bundled families are hidden, the Korean
+    /// set is not (the latter only in a build with the PPM font set).
+    #[test]
+    fn bundled_families_without_hangul_are_hidden_from_the_menu() {
+        let db = FontDb::with_font_dirs(vec![]);
+        let hide = db.bundled_without_hangul();
+        for f in ["source sans 3", "inter"] {
+            assert!(hide.contains(f), "{f}");
+        }
+        let menu = db.families_in_except("en", &hide);
+        assert!(!menu.iter().any(|f| f.eq_ignore_ascii_case("Source Sans 3")));
+        assert!(db.families().iter().any(|f| f.eq_ignore_ascii_case("Source Sans 3")), "still loaded");
+        if db.has_family("NanumGothic") {
+            for f in ["nanumgothic", "nanummyeongjo", "nanumgothiccoding", "black han sans", "pretendard"] {
+                assert!(!hide.contains(f) && menu.iter().any(|m| m.eq_ignore_ascii_case(f)), "{f} is listed");
+            }
+        }
+    }
+
+    /// A Korean interface shows the Korean set by the fonts' own Korean names and Pretendard (no
+    /// Korean name) in English; a Korean name finds its English family. Skipped (printed) in a build
+    /// without the PPM font set, like the other tests of it.
+    #[test]
+    fn the_korean_set_shows_korean_names_in_a_korean_interface() {
+        let db = FontDb::with_font_dirs(vec![]);
+        if !db.has_family("NanumGothic") {
+            eprintln!("skipped: built without the PPM font set (CRAFT_FONTS_DIR)");
+            return;
+        }
+        let want =
+            [("NanumGothic", "나눔고딕"), ("NanumMyeongjo", "나눔명조"), ("NanumGothicCoding", "나눔고딕코딩"), ("Black Han Sans", "검은고딕")];
+        let names = db.localized_names("ko");
+        let ko = db.families_in("ko");
+        for (en, shown) in want {
+            assert!(names.iter().any(|(e, l)| e == en && l == shown), "{en} -> {shown}");
+            assert!(ko.iter().any(|f| f == shown) && !ko.iter().any(|f| f == en), "{en} is listed as {shown}");
+            assert_eq!(db.english_family(shown).as_deref(), Some(en), "{shown} stands for {en}");
+        }
+        assert!(!names.iter().any(|(e, _)| e == "Pretendard"), "no Korean name");
+        assert!(ko.iter().any(|f| f == "Pretendard"));
+        // Other interface languages list the English names.
+        assert!(db.families_in("en").iter().any(|f| f == "NanumGothic"));
     }
 
     #[test]
