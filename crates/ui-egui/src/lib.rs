@@ -5801,7 +5801,10 @@ mod tests {
         assert!(h.query(By::new().role(Role::TextInput).value("")).is_some(), "Backspace cleared the query");
         assert!(h.query_by_label("Recently Used Fonts").is_some(), "the section shows while nothing is typed");
         assert!(h.query_by_label("All Fonts").is_some());
-        assert_eq!(h.query_all_by_label("Recent Font Beta").count(), 1);
+        // The PPM menu adds the font in use (here an uninstalled one) to All Fonts, so it is also
+        // listed there, as an installed recent font is.
+        let in_use = if cfg!(feature = "ppm-host") { 2 } else { 1 };
+        assert_eq!(h.query_all_by_label("Recent Font Beta").count(), in_use);
         assert_eq!(h.query_all_by_label("Recent Font Alpha").count(), 1);
         // Down moves to the second recent font; Enter applies it.
         h.event(key(egui::Key::ArrowDown, egui::Modifiers::NONE));
