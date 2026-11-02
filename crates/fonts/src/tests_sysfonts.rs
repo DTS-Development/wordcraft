@@ -420,6 +420,12 @@ fn chinese_fonts_are_listed_by_their_chinese_names_in_a_chinese_interface() {
         ("zh-hant", "zh-Hans", false),
         ("ja", "ja-JP", true),
         ("ja", "ko-KR", false),
+        ("ko", "ko", true),
+        ("ko", "ko-KR", true),
+        ("ko-KR", "ko", true),
+        ("ko", "ja-JP", false),
+        ("ko", "zh-Hans", false),
+        ("en", "ko-KR", false),
         ("en", "zh-Hans", false),
     ] {
         assert_eq!(name_language_matches(ui, tag), ok, "{ui} {tag}");

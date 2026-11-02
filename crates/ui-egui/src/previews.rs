@@ -699,6 +699,33 @@ pub fn table_style_tile(ui: &mut Ui, app: &mut WordApp, style: &str) -> Response
 mod tests {
     use super::*;
 
+    /// A Korean interface lists the Korean set by Korean names, and a name picked from the list
+    /// is stored as the English family. Skipped (printed) without the PPM font set.
+    #[test]
+    fn korean_font_names_are_shown_and_stored_as_english_families() {
+        if !wordcraft_fonts::FontDb::global().is_loaded("NanumGothic") {
+            eprintln!("skipped: built without the PPM font set (CRAFT_FONTS_DIR)");
+            return;
+        }
+        crate::i18n::set_current(crate::i18n::Lang::from_code("ko").unwrap());
+        let mut p = Previews::default();
+        let fams = p.families();
+        for (en, shown) in
+            [("NanumGothic", "나눔고딕"), ("NanumMyeongjo", "나눔명조"), ("NanumGothicCoding", "나눔고딕코딩"), ("Black Han Sans", "검은고딕")]
+        {
+            assert!(fams.iter().any(|f| f == shown), "{shown} is listed");
+            assert_eq!(p.font_shown(en), shown);
+            // A native test also sees installed fonts, whose English names may be spelled with
+            // spaces ("Nanum Gothic"); the web build has only the bundled set.
+            let stored = p.font_stored(shown);
+            assert_eq!(stored.replace(' ', ""), en.replace(' ', ""), "{shown} is stored as an English family");
+            assert!(stored.is_ascii());
+        }
+        assert!(fams.iter().any(|f| f == "Pretendard"));
+        assert_eq!((p.font_shown("Pretendard"), p.font_stored("Pretendard")), ("Pretendard".to_string(), "Pretendard".to_string()));
+        crate::i18n::set_current(crate::i18n::Lang::EN);
+    }
+
     /// #848: each trip through the Font box loaded every family it showed, for good. Entries are
     /// now drawn with a face read for the preview alone: installed families stay unloaded.
     #[test]

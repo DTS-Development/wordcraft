@@ -682,6 +682,31 @@ mod tests {
         }
     }
 
+    /// A Korean interface shows the Korean set by the fonts' own Korean names and Pretendard (no
+    /// Korean name) in English; a Korean name finds its English family. Skipped (printed) in a build
+    /// without the PPM font set, like the other tests of it.
+    #[test]
+    fn the_korean_set_shows_korean_names_in_a_korean_interface() {
+        let db = FontDb::with_font_dirs(vec![]);
+        if !db.has_family("NanumGothic") {
+            eprintln!("skipped: built without the PPM font set (CRAFT_FONTS_DIR)");
+            return;
+        }
+        let want =
+            [("NanumGothic", "나눔고딕"), ("NanumMyeongjo", "나눔명조"), ("NanumGothicCoding", "나눔고딕코딩"), ("Black Han Sans", "검은고딕")];
+        let names = db.localized_names("ko");
+        let ko = db.families_in("ko");
+        for (en, shown) in want {
+            assert!(names.iter().any(|(e, l)| e == en && l == shown), "{en} -> {shown}");
+            assert!(ko.iter().any(|f| f == shown) && !ko.iter().any(|f| f == en), "{en} is listed as {shown}");
+            assert_eq!(db.english_family(shown).as_deref(), Some(en), "{shown} stands for {en}");
+        }
+        assert!(!names.iter().any(|(e, _)| e == "Pretendard"), "no Korean name");
+        assert!(ko.iter().any(|f| f == "Pretendard"));
+        // Other interface languages list the English names.
+        assert!(db.families_in("en").iter().any(|f| f == "NanumGothic"));
+    }
+
     #[test]
     fn family_cache_stays_bounded() {
         for i in 0..(FAMILY_CACHE_MAX + 50) {
