@@ -8088,6 +8088,33 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The PPM build's font menu lists only fonts that draw Hangul: the Latin-only bundled ones and
+    /// the theme names are hidden, the Korean set stays, and the font in use is added back.
+    #[cfg(feature = "ppm-host")]
+    #[test]
+    fn the_ppm_font_menu_hides_fonts_without_hangul() {
+        let mut a = typed();
+        let fams = a.previews.families();
+        let has = |l: &[String], n: &str| l.iter().any(|f| f.eq_ignore_ascii_case(n));
+        for hidden in ["Source Sans 3", "Inter", "Aptos", "Aptos Display"] {
+            assert!(!has(&fams, hidden), "{hidden} is hidden");
+        }
+        // The bundled files stay loaded: Office names and the UI still need them.
+        assert!(wordcraft_fonts::FontDb::global().has_family("Source Sans 3"));
+        // The Korean set (only in a build with CRAFT_FONTS_DIR) is listed, by its Korean name when the
+        // font has one.
+        if wordcraft_fonts::FontDb::global().is_loaded("NanumGothic") {
+            for shown in ["NanumGothic", "NanumMyeongjo", "NanumGothicCoding", "Black Han Sans", "Pretendard"] {
+                assert!(has(&fams, shown) || a.previews.font_shown(shown) != shown, "{shown} is listed");
+            }
+        }
+        // The font in use stays in the list even when hidden; a listed one is not doubled.
+        let with = crate::previews::Previews::with_current(fams.clone(), "Aptos");
+        assert!(has(&with, "Aptos") && with.len() == fams.len() + 1);
+        assert_eq!(crate::previews::Previews::with_current(fams.clone(), &fams[0]).len(), fams.len());
+        assert_eq!(crate::previews::Previews::with_current(fams.clone(), "").len(), fams.len());
+    }
+
     /// Add Font… (#582), web: the picker asks for fonts, the picked file arrives through the
     /// inbox and is added, listed in the font menu and kept in the browser; removing it forgets it.
     #[test]

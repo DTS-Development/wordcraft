@@ -164,7 +164,7 @@ fn fallback_lookups_are_remembered_until_fonts_load() {
     let latin = db.face(FALLBACK_FAMILY, "Regular");
     // A cache-miss fixture must stay absent even when Thai Craft fonts are embedded.
     // The coverage-index regression below also uses this supplementary private-use range.
-    let missing = '\u{F0001}';
+    let missing = '\u{100001}';
     assert!(db.fallback_for(missing, latin.id()).is_none(), "no bundled font covers the cache-miss fixture");
     if crate::CRAFT_FONTS.iter().any(|font| font.scripts.contains(&"Thai")) {
         assert!(db.fallback_for('ก', latin.id()).is_some(), "the embedded Thai face supplies its glyph");
@@ -288,7 +288,7 @@ fn fallback_cache_is_dropped_when_a_face_loads_by_its_legacy_family_name() {
     db.set_system_fallback(false);
     let latin = db.face(FALLBACK_FAMILY, "Regular");
     // Keep the negative cache entry independent of the optional Thai font input.
-    let missing = '\u{F0001}';
+    let missing = '\u{100001}';
     assert!(db.fallback_for(missing, latin.id()).is_none());
     if crate::CRAFT_FONTS.iter().any(|font| font.scripts.contains(&"Thai")) {
         assert!(db.fallback_for('ก', latin.id()).is_some(), "the embedded Thai face supplies its glyph");
@@ -323,10 +323,10 @@ fn fallback_reads_each_installed_font_file_once_however_many_characters_miss() {
     let latin = db.face(FALLBACK_FAMILY, "Regular");
     let found = db.fallback_for('\u{30000}', latin.id()).expect("the installed font maps it");
     assert_eq!((found.family.as_str(), found.style.as_str()), (FAMILY, "Regular"));
-    // 2,000 distinct characters nothing maps (Supplementary Private Use Area-A: no font here,
+    // 2,000 distinct characters nothing maps (Supplementary Private Use Area-B: no font here,
     // bundled or craft-fonts, maps it; CJK Extension G after U+30000 is partly in Noto Sans CJK
     // SC): the index answers, no file is read again.
-    for cp in 0xF_0001..0xF_0001 + 2000 {
+    for cp in 0x10_0001..0x10_0001 + 2000 {
         let c = char::from_u32(cp).unwrap();
         assert!(db.fallback_for(c, latin.id()).is_none());
     }

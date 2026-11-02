@@ -161,8 +161,18 @@ impl Previews {
         if self.families.as_ref().is_none_or(|(l, _)| *l != lang) || self.font_gen != generation {
             self.font_gen = generation;
             let db = wordcraft_fonts::FontDb::global();
-            let mut f: Vec<String> = db.families_in(lang).into_iter().filter(|f| !f.starts_with('.')).collect();
-            for w in [wordcraft_doc::styles::BODY_FONT, wordcraft_doc::styles::HEADING_FONT] {
+            // The PPM build lists only fonts that draw Hangul: the bundled Latin-only ones (still
+            // loaded for Office names and the UI) and the theme names (Aptos…) stay out. Fonts
+            // added at run time or embedded in a document are never hidden.
+            #[cfg(feature = "ppm-host")]
+            let (mut f, theme): (Vec<String>, &[&str]) =
+                (db.families_in_except(lang, &db.bundled_without_hangul()).into_iter().filter(|f| !f.starts_with('.')).collect(), &[]);
+            #[cfg(not(feature = "ppm-host"))]
+            let (mut f, theme): (Vec<String>, &[&str]) = (
+                db.families_in(lang).into_iter().filter(|f| !f.starts_with('.')).collect(),
+                &[wordcraft_doc::styles::BODY_FONT, wordcraft_doc::styles::HEADING_FONT],
+            );
+            for w in theme {
                 if !f.iter().any(|x| x == w) {
                     f.push(w.to_string());
                 }
@@ -176,6 +186,20 @@ impl Previews {
             self.east_asian = None;
         }
         self.families.as_ref().map(|(_, f)| f.clone()).unwrap_or_default()
+    }
+
+    /// `fams` with the font in use (`shown`, as the font box names it) added when the PPM build's
+    /// list hides it, so the selection stays in the list. Other builds list every font already.
+    #[cfg_attr(not(feature = "ppm-host"), allow(unused_mut))]
+    pub fn with_current(mut fams: Vec<String>, shown: &str) -> Vec<String> {
+        #[cfg(feature = "ppm-host")]
+        if !shown.is_empty() && !fams.iter().any(|f| f.eq_ignore_ascii_case(shown)) {
+            fams.push(shown.to_string());
+            fams.sort_by_key(|a| a.to_lowercase());
+        }
+        #[cfg(not(feature = "ppm-host"))]
+        let _ = shown;
+        fams
     }
 
     /// The Font dialog's Asian text font list: the installed Chinese, Japanese and Korean fonts,
