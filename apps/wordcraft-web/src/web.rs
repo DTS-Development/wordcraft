@@ -183,6 +183,7 @@ impl eframe::App for WebShell {
         }
         if let Some(bridge) = &self.bridge {
             bridge.deliver_tables(&mut self.app);
+            bridge.deliver_gotos(&mut self.app);
             bridge.deliver_bytes(&mut self.app);
         }
         self.app.logic(ctx);
@@ -200,6 +201,7 @@ impl eframe::App for WebShell {
     }
 
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw: &mut egui::RawInput) {
+        crate::clipboard_keys::drop_clipboard_key_presses(&mut raw.events);
         self.app.raw_input_hook(raw);
     }
 

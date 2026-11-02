@@ -56,6 +56,7 @@ pub mod file_browser;
 pub mod file_dialogs;
 pub mod frame;
 pub mod guides;
+pub mod host_goto;
 pub mod host_lock;
 pub mod host_table;
 pub mod i18n;
@@ -5800,7 +5801,10 @@ mod tests {
         assert!(h.query(By::new().role(Role::TextInput).value("")).is_some(), "Backspace cleared the query");
         assert!(h.query_by_label("Recently Used Fonts").is_some(), "the section shows while nothing is typed");
         assert!(h.query_by_label("All Fonts").is_some());
-        assert_eq!(h.query_all_by_label("Recent Font Beta").count(), 1);
+        // The PPM menu adds the font in use (here an uninstalled one) to All Fonts, so it is also
+        // listed there, as an installed recent font is.
+        let in_use = if cfg!(feature = "ppm-host") { 2 } else { 1 };
+        assert_eq!(h.query_all_by_label("Recent Font Beta").count(), in_use);
         assert_eq!(h.query_all_by_label("Recent Font Alpha").count(), 1);
         // Down moves to the second recent font; Enter applies it.
         h.event(key(egui::Key::ArrowDown, egui::Modifiers::NONE));
@@ -8087,11 +8091,44 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The PPM build's font menu lists only fonts that draw Hangul: the Latin-only bundled ones are
+    /// hidden, the theme font rows and the Korean set stay, and the font in use is added back.
+    #[cfg(feature = "ppm-host")]
+    #[test]
+    fn the_ppm_font_menu_hides_fonts_without_hangul() {
+        let mut a = typed();
+        let fams = a.previews.families();
+        let has = |l: &[String], n: &str| l.iter().any(|f| f.eq_ignore_ascii_case(n));
+        for hidden in ["Source Sans 3", "Inter"] {
+            assert!(!has(&fams, hidden), "{hidden} is hidden");
+        }
+        // The theme font rows stay.
+        assert!(has(&fams, "Aptos") && has(&fams, "Aptos Display"));
+        // The bundled files stay loaded: Office names and the UI still need them.
+        assert!(wordcraft_fonts::FontDb::global().has_family("Source Sans 3"));
+        // The Korean set (only in a build with CRAFT_FONTS_DIR) is listed, by its Korean name when the
+        // font has one.
+        if wordcraft_fonts::FontDb::global().is_loaded("NanumGothic") {
+            for shown in ["NanumGothic", "NanumMyeongjo", "NanumGothicCoding", "Black Han Sans", "Pretendard"] {
+                assert!(has(&fams, &a.previews.font_shown(shown)), "{shown} is listed");
+            }
+        }
+        // The font in use stays in the list even when hidden; a listed one is not doubled.
+        let with = crate::previews::Previews::with_current(fams.clone(), "Source Sans 3");
+        assert!(with[0] == "Source Sans 3" && with.len() == fams.len() + 1, "the selection goes on top");
+        assert_eq!(crate::previews::Previews::with_current(fams.clone(), &fams[0]).len(), fams.len());
+        assert_eq!(crate::previews::Previews::with_current(fams.clone(), "").len(), fams.len());
+        // A document font the list never had (Calibri, drawn with Carlito) is on top too: the font
+        // dialogs, the style dialog and the ribbon all pass the font in use through here.
+        assert!(!has(&fams, "Calibri"));
+        assert_eq!(crate::previews::Previews::with_current(fams.clone(), "Calibri")[0], "Calibri");
+    }
+
     /// Add Font… (#582), web: the picker asks for fonts, the picked file arrives through the
     /// inbox and is added, listed in the font menu and kept in the browser; removing it forgets it.
     #[test]
     fn a_font_picked_on_the_web_is_added_listed_and_kept() {
-        const FAMILY: &str = "Uifont Sans 3";
+        const FAMILY: &str = "Aaaaaa Sans 3";
         let mut font = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/fonts/SourceSans3-Regular.ttf")).unwrap();
         let utf16 = |s: &str| s.encode_utf16().flat_map(u16::to_be_bytes).collect::<Vec<u8>>();
         for (from, to) in [(utf16("Source Sans 3"), utf16(FAMILY)), (b"Source Sans 3".to_vec(), FAMILY.as_bytes().to_vec())] {
@@ -8119,6 +8156,13 @@ mod tests {
         a.drain_inbox();
         a.watch_fonts(&ctx);
         assert!(a.previews.families().iter().any(|f| f == FAMILY), "listed in the font menu at once");
+        // The PPM menu lists run-time fonts after the bundled ones, though FAMILY sorts first.
+        #[cfg(feature = "ppm-host")]
+        {
+            let fams = a.previews.families();
+            let at = |n: &str| fams.iter().position(|f| f == n).unwrap();
+            assert!(at("Aptos Display") < at(FAMILY));
+        }
         assert_eq!(*kept.borrow(), vec![("Uifont-Regular.ttf".to_string(), font.len())]);
         assert!(body_text(&a).contains(UNSAVED), "the document stays open");
         // Junk named like a font is refused, and nothing is kept.

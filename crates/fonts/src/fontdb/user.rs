@@ -703,12 +703,13 @@ pub(crate) mod tests {
         assert!(db.families().iter().any(|f| f == "NanumGothic"));
         let ko = db.families_in("ko");
         let at = ko.iter().position(|f| f == "NanumGothic" || f == "나눔고딕").unwrap_or_else(|| panic!("{ko:?}"));
-        // A Korean name sorts after every Latin one: last in the list, below the visible part of the menu.
+        // A Korean name sorts after every Latin one: below the visible part of the menu.
         if ko[at] == "나눔고딕" {
-            assert_eq!(at, ko.len() - 1, "{ko:?}");
+            assert!(ko[at..].iter().all(|f| !f.is_ascii()), "{ko:?}");
         }
         assert!(db.has_family("NanumGothic") && db.is_loaded("NanumGothic"));
-        assert_eq!(db.styles("NanumGothic"), vec!["Regular".to_string()]);
+        // The PPM font set also bundles NanumGothic Bold.
+        assert_eq!(db.styles("NanumGothic").first().map(String::as_str), Some("Regular"));
     }
 
     /// With the PPM font set (`CRAFT_FONTS_DIR=ppm/fonts-ko`, as `ppm/build-web.sh` sets it) NanumGothic
@@ -726,9 +727,11 @@ pub(crate) mod tests {
         assert_eq!(db.install_uploaded_font("NanumGothic", nanum.bytes).unwrap(), 1);
         assert_ne!(db.face("NanumGothic", "Regular").id(), before, "the upload replaced the bundled face");
         assert!(db.families().iter().any(|f| f == "NanumGothic"));
-        // A Korean interface lists it by its Korean name, after every Latin name: the last row.
+        // A Korean interface lists it by its Korean name, after every Latin name (with the other
+        // Korean names of the set).
         let ko = db.families_in("ko");
-        assert_eq!(ko.last().map(String::as_str), Some("나눔고딕"), "{ko:?}");
+        let at = ko.iter().position(|f| f == "나눔고딕").unwrap_or_else(|| panic!("{ko:?}"));
+        assert!(ko[at..].iter().all(|f| !f.is_ascii()), "{ko:?}");
     }
 
     #[test]
