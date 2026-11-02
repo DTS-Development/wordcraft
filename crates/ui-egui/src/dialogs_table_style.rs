@@ -502,19 +502,17 @@ pub fn body(app: &mut WordApp, ui: &mut Ui, f: Form) -> bool {
     ui.separator();
     let theme = app.session.doc.settings.theme_colors.clone();
     let fams = app.previews.families();
-    let fams = match regions.get(*region) {
-        Some(r) => crate::previews::Previews::with_current(fams, &app.previews.font_shown(&r.font)),
-        None => fams,
-    };
+    let shown_font = regions.get(*region).map(|r| app.previews.font_shown(&r.font)).unwrap_or_default();
+    let fams = crate::previews::Previews::with_current(fams, &shown_font);
     let preview_fn = app.previews.font_preview_fn();
     if let Some(r) = regions.get_mut(*region) {
         ui.label(egui::RichText::new(tl!("Formatting")).font(crate::theme::semibold(12.5)));
         // Font, size, bold, italic, underline and text colour.
         ui.horizontal(|ui| {
-            if let Some(f) = crate::widgets::font_combo(ui, "tstyle_font", 170.0, &r.font, &fams, Some(&*preview_fn))
+            if let Some(f) = crate::widgets::font_combo(ui, "tstyle_font", 170.0, &shown_font, &fams, Some(&*preview_fn))
                 && f != crate::widgets::ADD_FONT
             {
-                r.font = f;
+                r.font = app.previews.font_stored(&f);
             }
             ui.add(egui::TextEdit::singleline(&mut r.size).desired_width(36.0)).on_hover_text(tl!("Size:"));
             ui.toggle_value(&mut r.bold, egui::RichText::new("B").strong()).on_hover_text(tl!("Bold"));

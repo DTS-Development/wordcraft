@@ -161,16 +161,17 @@ fn drop_cap_ui(app: &mut WordApp, ui: &mut Ui, f: &mut DropCapForm) -> bool {
     ui.add_space(6.0);
     ui.label(egui::RichText::new(tl!("Options")).font(semibold(12.5)));
     let fams = app.previews.families();
-    let fams = crate::previews::Previews::with_current(fams, &app.previews.font_shown(&f.font));
+    let shown_font = app.previews.font_shown(&f.font);
+    let fams = crate::previews::Previews::with_current(fams, &shown_font);
     let preview = app.previews.font_preview_fn();
     let unit = crate::options::unit();
     ui.add_enabled_ui(f.position != "none", |ui| {
         egui::Grid::new("dropcap").num_columns(2).spacing(vec2(10.0, 6.0)).show(ui, |ui| {
             ui.label(tl!("Font:"));
-            if let Some(v) = crate::widgets::font_combo(ui, "dropcap_font", 190.0, &f.font, &fams, Some(&*preview))
+            if let Some(v) = crate::widgets::font_combo(ui, "dropcap_font", 190.0, &shown_font, &fams, Some(&*preview))
                 && v != crate::widgets::ADD_FONT
             {
-                f.font = v;
+                f.font = app.previews.font_stored(&v);
             }
             ui.end_row();
             ui.label(tl!("Lines to drop:"));
@@ -1431,6 +1432,25 @@ mod tests {
 
     fn app() -> WordApp {
         WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::from_text("one\ntwo")), Default::default())
+    }
+
+    /// A font picked by its Korean name goes through `font_stored`, so the drop cap holds the
+    /// English family: equal to the text's font it is left out, otherwise sent as English.
+    /// (The combo wiring itself is not drivable here.) Skipped without the PPM font set.
+    #[test]
+    fn drop_cap_font_picked_by_korean_name_is_stored_as_english() {
+        if !wordcraft_fonts::FontDb::global().is_loaded("NanumGothic") {
+            eprintln!("skipped: built without the PPM font set (CRAFT_FONTS_DIR)");
+            return;
+        }
+        crate::i18n::set_current(crate::i18n::Lang::from_code("ko").unwrap());
+        let mut a = app();
+        let font = a.previews.font_stored("나눔고딕");
+        let mut f = DropCapForm { position: "dropped".into(), text_font: font.clone(), font, lines: 3, distance: 0.0 };
+        assert!(f.params()["font"].is_null(), "same as the text font: no font of its own");
+        f.text_font = "Calibri".into();
+        assert_eq!(f.params()["font"].as_str().map(|s| s.replace(' ', "")), Some("NanumGothic".to_string()));
+        crate::i18n::set_current(crate::i18n::Lang::EN);
     }
 
     fn drop_cap_form(a: &mut WordApp) -> Option<DropCapForm> {
