@@ -2415,6 +2415,7 @@ fn mouse(app: &mut WordApp, ui: &Ui, resp: &egui::Response, rects: &[Rect], layo
             (hf_zone.is_some() && story == StoryRef::Body) || (matches!(story, StoryRef::Part(_)) && !in_text_box(app) && hf_zone.is_none());
         // Clicking into a footnote/endnote or a text box edits it; clicking outside a text box goes
         // back to where it is. While editing a header/footer, only its own text boxes are in reach.
+        let prev_story = story;
         let story = {
             let is_note = |s: StoryRef| matches!(part_kind(app, s), Some(PartKind::Footnote | PartKind::Endnote));
             let is_box = |s: StoryRef| part_kind(app, s) == Some(PartKind::TextBox);
@@ -2506,7 +2507,7 @@ fn mouse(app: &mut WordApp, ui: &Ui, resp: &egui::Response, rects: &[Rect], layo
             return;
         }
         app.canvas.column_drag = None;
-        let _ = app.run("caret.set", json!({"pos": pj, "extend": mods.shift}));
+        let _ = app.run("caret.set", json!({"pos": pj, "extend": mods.shift && story == prev_story}));
         // Double-click selects a word, triple-click a paragraph, Ctrl/⌘+click a sentence; holding
         // the button and dragging then extends by whole units (Word, #549).
         let unit = match clicks {
@@ -3386,6 +3387,45 @@ mod tests {
         assert!(s.apply(vec2(1100.0, 700.0), 5.0, true, false), "a zoom with a still window applies now");
         s.leave();
         assert!(s.entering());
+    }
+
+    /// Shift+click into the other header/footer moves the caret there; it never spans two stories.
+    #[test]
+    fn shift_click_into_the_other_header_footer_only_moves_the_caret() {
+        use egui::{Event, Modifiers, PointerButton};
+        let mut a = WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::from_text("Body marker.")), Default::default());
+        a.run("insert.footer", json!({"text": "Footer marker."})).unwrap();
+        let footer = a.session.sel.focus.story;
+        a.run("insert.header", json!({"text": "Header marker."})).unwrap();
+        let header = a.session.sel.focus.story;
+        a.run("view.commentsPane", json!({"value": false})).unwrap();
+        let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1440.0, 1800.0)).with_step_dt(1.0 / 60.0).build_ui_state(
+            |ui, app: &mut WordApp| {
+                let ctx = ui.ctx().clone();
+                app.logic(&ctx);
+                app.ui(ui);
+            },
+            a,
+        );
+        for _ in 0..6 {
+            h.step();
+        }
+        let y = h.state_mut().session.layout().pages[0].body.bottom() + 20.0;
+        let at = page_to_screen(h.state_mut(), 0, 100.0, y).expect("on screen");
+        h.event(Event::ModifiersChanged(Modifiers::SHIFT));
+        h.step();
+        h.event(Event::PointerMoved(at));
+        for pressed in [true, false] {
+            h.event(Event::PointerButton { pos: at, button: PointerButton::Primary, pressed, modifiers: Modifiers::SHIFT });
+            h.step();
+        }
+        for _ in 0..3 {
+            h.step();
+        }
+        let sel = h.state().session.sel.clone();
+        assert_ne!(header, footer);
+        assert_eq!((sel.anchor.story, sel.focus.story), (footer, footer), "caret moved to the footer");
+        assert_eq!(sel.anchor, sel.focus, "no selection across stories");
     }
 
     /// A single click in the other header/footer area switches to its story (page-wise); none keeps it.
