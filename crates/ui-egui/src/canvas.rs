@@ -2423,6 +2423,7 @@ fn mouse(app: &mut WordApp, ui: &Ui, resp: &egui::Response, rects: &[Rect], layo
             let hf_box = if in_hf { layout.header_footer_text_box_at(page, x, y).map(StoryRef::Part) } else { None };
             match (hf_box, layout.story_at(page, x, y)) {
                 (Some(b), _) => b,
+                (None, _) if let Some(other) = other_hf_story(in_hf, hf_zone, host) => other,
                 (None, Some(s)) if is_note(s) => s,
                 (None, Some(s)) if is_box(s) && !in_hf => s,
                 (None, Some(StoryRef::Body)) if is_note(story) => StoryRef::Body,
@@ -2989,6 +2990,15 @@ pub fn in_text_box(app: &WordApp) -> bool {
     part_kind(app, app.session.sel.focus.story) == Some(PartKind::TextBox)
 }
 
+/// While editing a header/footer, a single click in another header/footer area that shows a story
+/// on that page goes into it (as the double-click does); an area with none keeps the current one.
+fn other_hf_story(in_hf: bool, zone: Option<(Option<StoryRef>, bool)>, host: StoryRef) -> Option<StoryRef> {
+    match zone {
+        Some((Some(shown), _)) if in_hf && shown != host => Some(shown),
+        _ => None,
+    }
+}
+
 fn part_kind(app: &WordApp, s: StoryRef) -> Option<PartKind> {
     match s {
         StoryRef::Part(id) => app.session.doc.parts.get(&id).map(|p| p.kind),
@@ -3376,6 +3386,26 @@ mod tests {
         assert!(s.apply(vec2(1100.0, 700.0), 5.0, true, false), "a zoom with a still window applies now");
         s.leave();
         assert!(s.entering());
+    }
+
+    /// A single click in the other header/footer area switches to its story (page-wise); none keeps it.
+    #[test]
+    fn single_click_in_the_other_header_footer_switches_story() {
+        let mut app = WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::from_text("Body marker.")), Default::default());
+        app.run("insert.footer", json!({"text": "Footer marker."})).unwrap();
+        let footer = app.session.sel.focus.story;
+        app.run("insert.header", json!({"text": "Header marker."})).unwrap();
+        let header = app.session.sel.focus.story;
+        assert_ne!(header, footer);
+        let layout = app.session.layout();
+        let (top, bottom) = (layout.pages[0].body.y - 1.0, layout.pages[0].body.bottom() + 1.0);
+        let zone = |y| layout.header_footer_zone(0, y);
+        assert_eq!(other_hf_story(true, zone(bottom), header), Some(footer), "header -> footer");
+        assert_eq!(other_hf_story(true, zone(top), footer), Some(header), "footer -> header");
+        assert_eq!(other_hf_story(true, zone(top), header), None, "same header");
+        assert_eq!(other_hf_story(false, zone(bottom), StoryRef::Body), None, "not editing a header/footer");
+        assert_eq!(other_hf_story(true, Some((None, false)), header), None, "no footer on that page");
+        assert_eq!(other_hf_story(true, None, header), None, "body click");
     }
 
     /// #2545: notes belong to the body editing context, not the faded header/footer context.
