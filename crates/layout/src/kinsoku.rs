@@ -5,7 +5,12 @@
 //!   and none ends with opening punctuation (（「【…). UAX #14 already forbids most of these
 //!   breaks; the lists make sure of it for the standard Japanese/Chinese sets.
 //! - Kinsoku off: a line may break between any two East Asian characters, punctuation included.
-//! - Word wrap off: Latin words may break at any character.
+//! - Word wrap on (the default): Korean words stay whole — no break between two Hangul characters,
+//!   or between Hangul and a Latin letter or digit it is glued to ("AWP를"). UAX #14 lets a line
+//!   break between any two Hangul syllables (like ideographs), but Korean wraps at spaces, as Word
+//!   does unless the paragraph allows breaking words ("한글 단어 잘림 허용", `w:wordWrap` off). A word
+//!   longer than the line still breaks anywhere.
+//! - Word wrap off: Latin and Korean words may break at any character.
 //! - Automatic spacing (`autoSpaceDE`, `autoSpaceDN`): which neighbouring characters get room
 //!   between Asian text and Latin text or digits ([`auto_space`]).
 //!
@@ -55,7 +60,12 @@ pub fn apply(text: &str, opps: &mut Vec<usize>, kinsoku: bool, word_wrap: bool) 
             }
         }
     }
-    if !word_wrap {
+    if word_wrap {
+        // Korean wraps at spaces: drop the UAX #14 opportunities inside a run of Hangul, or between
+        // Hangul and the letters or digits attached to it. Ideographs and kana keep breaking anywhere.
+        let word = |c: char| is_hangul(c) || (c.is_alphanumeric() && !is_east_asian(c));
+        opps.retain(|&i| !(prev_char(i).zip(next_char(i)).is_some_and(|(a, b)| word(a) && word(b) && (is_hangul(a) || is_hangul(b)))));
+    } else {
         // Between any two letters or digits that are not East Asian (whole graphemes, so accents
         // stay with their letters).
         let latin = |g: &str| g.chars().next().is_some_and(|c| c.is_alphanumeric() && !is_east_asian(c));
@@ -127,6 +137,20 @@ mod tests {
         let mut opps: Vec<usize> = unicode_linebreak::linebreaks(text).map(|(i, _)| i).filter(|&i| i < text.len()).collect();
         apply(text, &mut opps, kinsoku, word_wrap);
         opps.iter().map(|&i| text.get(i..).and_then(|t| t.chars().next()).map(String::from).unwrap_or_default()).collect()
+    }
+
+    #[test]
+    fn korean_words_wrap_whole() {
+        // Word wrap on: a line may start only after the spaces (and after the comma), never inside
+        // "소프트웨어", "라이선스" or "AWP를".
+        let ko = "소프트웨어 라이선스, AWP를 3D모델과 日本語で";
+        let on = breaks(ko, true, true);
+        assert_eq!(on, ["라", "A", "3", "日", "本", "語", "で"], "{on:?}");
+        // Word wrap off: Korean (and Latin) words break at any character.
+        let off = breaks(ko, true, false);
+        for c in ["프", "트", "웨", "어", "이", "선", "스", "W", "P", "를", "D", "모", "델", "과"] {
+            assert!(off.iter().any(|s| s == c), "word wrap off: a line may start at {c}: {off:?}");
+        }
     }
 
     #[test]
