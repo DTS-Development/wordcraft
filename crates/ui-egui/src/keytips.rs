@@ -881,6 +881,30 @@ mod tests {
         assert_eq!(tab_letter("Table Layout"), "JL");
     }
 
+    /// Press the Help tab's Discord keytip; the URL the app was asked to open, if any.
+    fn press_help_discord(a: &mut WordApp) -> Option<String> {
+        a.run("ui.tab", serde_json::json!({ "tab": "Help" })).unwrap();
+        let i = controls_public("Help").iter().position(|c| c.id == "ui.discord").expect("Help has a Discord keytip");
+        a.ui.keytips = Phase::Commands;
+        let letter = letter_for(a, i);
+        let key = egui::Key::from_name(&letter).expect("the badge is a letter key");
+        assert!(handle_key(a, key));
+        assert_eq!(a.ui.keytips, Phase::Off);
+        a.canvas.open_url.take()
+    }
+
+    /// Host lock with links off: the Help tab's Discord keytip reaches `Target::run` ->
+    /// `WordApp::run`, which refuses `ui.discord` before it sets the URL to open. The unlocked
+    /// app is the control: the same presses open the link, so the test does press Discord.
+    #[test]
+    fn locked_help_discord_keytip_opens_nothing() {
+        assert!(press_help_discord(&mut app()).is_some(), "unlocked, the keytip opens the link");
+        let mut a = app();
+        a.session.lock_to_host();
+        assert!(!a.links_allowed());
+        assert!(press_help_discord(&mut a).is_none(), "the locked app opens no link from a keytip");
+    }
+
     #[test]
     fn every_keytip_command_is_registered() {
         // The keytip tables name commands by id; a renamed or removed command must fail here,
