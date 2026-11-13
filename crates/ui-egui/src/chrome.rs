@@ -636,14 +636,14 @@ impl WordApp {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn discord_pill_follows_links_and_switch() {
-        assert!(super::discord_pill_shown(true, true));
-        assert!(!super::discord_pill_shown(true, false), "host lock without links hides the pill");
-        assert!(!super::discord_pill_shown(false, true));
+        assert!(discord_pill_shown(true, true));
+        assert!(!discord_pill_shown(true, false), "host lock without links hides the pill");
+        assert!(!discord_pill_shown(false, true));
     }
-
-    use super::*;
 
     fn ctx() -> egui::Context {
         let ctx = egui::Context::default();
