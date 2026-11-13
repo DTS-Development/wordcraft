@@ -15,6 +15,8 @@
 #[cfg(any(target_arch = "wasm32", test))]
 mod clipboard_keys;
 #[cfg(any(target_arch = "wasm32", test))]
+mod find_keys;
+#[cfg(any(target_arch = "wasm32", test))]
 mod launch;
 #[cfg(any(target_arch = "wasm32", test))]
 mod prefs;

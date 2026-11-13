@@ -183,6 +183,9 @@ impl Bridge {
         services.host_policy = Some(policy.clone());
         self.listen(host_inbox, policy, ctx);
         self.block_page_save();
+        if crate::launch::HOST_BUILD {
+            self.block_page_find();
+        }
         let bridge = self.clone();
         services.download = Some(Box::new(move |name: &str, bytes: &[u8]| bridge.post_save(name, bytes)));
         // The app tells the dirty flag after each pass; the parent hears it when it changes.
@@ -355,6 +358,32 @@ impl Bridge {
             }
         });
         if self.window.add_event_listener_with_callback("keydown", on_key.as_ref().unchecked_ref()).is_ok() {
+            on_key.forget();
+        }
+    }
+
+    /// Cmd/Ctrl+F, G, H and F3 are the editor's Find keys; eframe leaves them to the browser, whose
+    /// find bar would open over the editor's. Capture phase, no `stopPropagation`: egui still gets the key.
+    fn block_page_find(&self) {
+        let on_key = Closure::<dyn FnMut(web_sys::KeyboardEvent)>::new(|event: web_sys::KeyboardEvent| {
+            if crate::find_keys::blocks_browser_default(
+                event.ctrl_key(),
+                event.meta_key(),
+                event.shift_key(),
+                event.alt_key(),
+                &event.code(),
+                &event.key(),
+            ) {
+                event.prevent_default();
+            }
+        });
+        let options = web_sys::AddEventListenerOptions::new();
+        options.set_capture(true);
+        if self
+            .window
+            .add_event_listener_with_callback_and_add_event_listener_options("keydown", on_key.as_ref().unchecked_ref(), &options)
+            .is_ok()
+        {
             on_key.forget();
         }
     }
