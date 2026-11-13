@@ -881,6 +881,23 @@ mod tests {
         assert_eq!(tab_letter("Table Layout"), "JL");
     }
 
+    /// Host lock with links off: the Help tab's Discord keytip reaches `Target::run` ->
+    /// `WordApp::run`, which refuses `ui.discord` before it sets the URL to open.
+    #[test]
+    fn locked_help_discord_keytip_opens_nothing() {
+        let mut a = app();
+        a.session.lock_to_host();
+        assert!(!a.links_allowed());
+        a.run("ui.tab", serde_json::json!({ "tab": "Help" })).unwrap();
+        let i = controls_public("Help").iter().position(|c| c.id == "ui.discord").expect("Help has a Discord keytip");
+        a.ui.keytips = Phase::Commands;
+        let letter = letter_for(&a, i);
+        let key = egui::Key::from_name(&letter).expect("the badge is a letter key");
+        assert!(handle_key(&mut a, key));
+        assert_eq!(a.ui.keytips, Phase::Off);
+        assert!(a.canvas.open_url.is_none(), "the locked app opens no link from a keytip");
+    }
+
     #[test]
     fn every_keytip_command_is_registered() {
         // The keytip tables name commands by id; a renamed or removed command must fail here,
