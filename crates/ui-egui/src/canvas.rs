@@ -1517,11 +1517,38 @@ pub fn show(app: &mut WordApp, ui: &mut Ui) {
             // The caret contrasts with what lies under it, like Word's inverted caret (#299):
             // worked out only when something is drawn in it.
             let caret_color = |app: &mut WordApp| caret_color_at(app, &layout, c.page, c.x + c.width / 2.0, c.top + c.height / 2.0, view, dim_body);
+            // While composing, the caret sits at the end of the composition (as in Word); the
+            // candidate window stays at the composition's start.
+            let preedit_w = if app.canvas.ime_preedit.is_empty() {
+                0.0
+            } else {
+                // The composition is interface text, but it may be in a script the interface fonts lack
+                // (Bangla, Thai ...): borrow the document fonts' fallback faces, or it draws as boxes (#565).
+                let new = crate::theme::faces_for_preedit(
+                    &app.canvas.ime_preedit,
+                    &app.canvas.ime_faces,
+                    |c| (c as u32) < 0x250,
+                    |c| wordcraft_fonts::FontDb::global().fallback_for(c, u32::MAX),
+                );
+                if !new.is_empty() {
+                    app.canvas.ime_faces.extend(new);
+                    crate::theme::install_fonts_language_extra(
+                        ui.ctx(),
+                        app.fonts_hans,
+                        app.fonts_korean,
+                        app.fonts_system_cjk,
+                        &app.canvas.ime_faces,
+                    );
+                    ui.ctx().request_repaint();
+                }
+                let color = caret_color(app);
+                painter.layout_no_wrap(app.canvas.ime_preedit.clone(), regular(c.height * scale * 0.8), color).size().x
+            };
             let bar = if c.width > 0.0 {
                 // Turned text (a table cell's text direction): the caret lies across the page.
                 [pos2(x, y0.round() + 0.5), pos2(x + c.width * scale, y0.round() + 0.5)]
             } else {
-                [pos2(x.round() + 0.5, y0), pos2(x.round() + 0.5, y1)]
+                [pos2(caret_x(x, preedit_w), y0), pos2(caret_x(x, preedit_w), y1)]
             };
             // The caret glides and fades like Word's (`caret_glide`).
             let shown = app.session.sel.is_collapsed() && focused;
@@ -1545,25 +1572,6 @@ pub fn show(app: &mut WordApp, ui: &mut Ui) {
                 });
             }
             if !app.canvas.ime_preedit.is_empty() {
-                // The composition is interface text, but it may be in a script the interface fonts lack
-                // (Bangla, Thai ...): borrow the document fonts' fallback faces, or it draws as boxes (#565).
-                let new = crate::theme::faces_for_preedit(
-                    &app.canvas.ime_preedit,
-                    &app.canvas.ime_faces,
-                    |c| (c as u32) < 0x250,
-                    |c| wordcraft_fonts::FontDb::global().fallback_for(c, u32::MAX),
-                );
-                if !new.is_empty() {
-                    app.canvas.ime_faces.extend(new);
-                    crate::theme::install_fonts_language_extra(
-                        ui.ctx(),
-                        app.fonts_hans,
-                        app.fonts_korean,
-                        app.fonts_system_cjk,
-                        &app.canvas.ime_faces,
-                    );
-                    ui.ctx().request_repaint();
-                }
                 let caret_color = caret_color(app);
                 let g = painter.text(pos2(x, y1), egui::Align2::LEFT_BOTTOM, &app.canvas.ime_preedit, regular(c.height * scale * 0.8), caret_color);
                 painter.line_segment([pos2(g.min.x, g.max.y), pos2(g.max.x, g.max.y)], Stroke::new(1.0, caret_color));
@@ -3366,8 +3374,19 @@ fn is_followable_link(url: &str) -> bool {
     wordcraft_doc::link::is_web_or_mail_link(url)
 }
 
+/// The caret bar's x: a whole pixel, past the composition being typed (`preedit_w`, 0 when none).
+fn caret_x(x: f32, preedit_w: f32) -> f32 {
+    (x + preedit_w).round() + 0.5
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn caret_x_follows_composition() {
+        assert_eq!(super::caret_x(10.2, 0.0), 10.5);
+        assert_eq!(super::caret_x(10.2, 14.0), 24.5);
+    }
+
     use super::*;
     use crate::table_resize::tests::{H, cell, screen, steps, table_window};
 
