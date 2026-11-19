@@ -19,6 +19,8 @@ mod find_keys;
 #[cfg(any(target_arch = "wasm32", test))]
 mod launch;
 #[cfg(any(target_arch = "wasm32", test))]
+mod paste_html;
+#[cfg(any(target_arch = "wasm32", test))]
 mod prefs;
 #[cfg(any(target_arch = "wasm32", test))]
 mod save_fallback;
