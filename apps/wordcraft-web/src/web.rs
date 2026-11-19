@@ -235,9 +235,9 @@ fn listen_for_pasted_pictures(inbox: Inbox, html: crate::paste_html::Slot, ctx: 
     let on_paste = wasm_bindgen::closure::Closure::<dyn FnMut(web_sys::ClipboardEvent)>::new(move |e: web_sys::ClipboardEvent| {
         // The target is always eframe's hidden text input while the page has focus; the app decides (#1349).
         let Some(data) = e.clipboard_data() else { return };
-        // Every paste replaces what an earlier one left.
+        // Each paste queues its own HTML, next to the paste eframe queues.
         let text = data.get_data("text").unwrap_or_default();
-        *html.borrow_mut() = crate::paste_html::capture(&text, &data.get_data("text/html").unwrap_or_default());
+        crate::paste_html::push(&html, &text, &data.get_data("text/html").unwrap_or_default());
         if !text.is_empty() {
             return;
         }

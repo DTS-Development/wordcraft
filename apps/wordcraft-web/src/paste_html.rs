@@ -11,29 +11,40 @@
 //! ribbon's Paste.
 
 use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::rc::Rc;
 
-/// The HTML of the paste event the app has not handled yet.
-pub(crate) type Slot = Rc<RefCell<Option<String>>>;
+/// The HTML of each paste event the app has not handled yet, oldest first: one entry per queued
+/// paste (`None` when that paste had no HTML), so a held Ctrl+V that queues several pastes in a
+/// frame pairs each with its own HTML, as the desktop's clipboard read does.
+pub(crate) type Slot = Rc<RefCell<VecDeque<Option<String>>>>;
 
-/// The HTML to keep for a paste event whose `text/plain` is `text`. eframe queues a paste only
-/// when it has text, so HTML alone (a bare picture copied from a page) stays for the picture
-/// listener. Size limits and blank checks are the engine's and `system_clipboard::fill`'s.
-pub(crate) fn capture(text: &str, html: &str) -> Option<String> {
-    (!text.is_empty() && !html.is_empty()).then(|| html.to_string())
+/// What a `paste` event adds to the queue: nothing when `text/plain` is empty (eframe queues no
+/// paste then; HTML alone, a bare picture copied from a page, stays for the picture listener),
+/// else an entry holding the HTML if there is any. Size limits and blank checks are the engine's
+/// and `system_clipboard::fill`'s.
+pub(crate) fn entry(text: &str, html: &str) -> Option<Option<String>> {
+    (!text.is_empty()).then(|| (!html.is_empty()).then(|| html.to_string()))
 }
 
-/// Called each frame with the events egui is about to run: a paste that isn't among them
-/// leaves nothing waiting.
-pub(crate) fn expire(slot: &Slot, events: &[egui::Event]) {
-    if !events.iter().any(|e| matches!(e, egui::Event::Paste(_))) {
-        slot.borrow_mut().take();
+/// Record a paste event.
+pub(crate) fn push(slot: &Slot, text: &str, html: &str) {
+    if let Some(e) = entry(text, html) {
+        slot.borrow_mut().push_back(e);
     }
 }
 
-/// What `Services::clipboard_html` returns: the waiting HTML, once.
+/// Called each frame with the events egui is about to run: a frame with no paste event leaves
+/// nothing waiting (eframe ignored the event, or the page didn't take it).
+pub(crate) fn expire(slot: &Slot, events: &[egui::Event]) {
+    if !events.iter().any(|e| matches!(e, egui::Event::Paste(_))) {
+        slot.borrow_mut().clear();
+    }
+}
+
+/// What `Services::clipboard_html` returns: the HTML of the oldest waiting paste, once.
 pub(crate) fn take(slot: &Slot) -> Option<String> {
-    slot.borrow_mut().take()
+    slot.borrow_mut().pop_front().flatten()
 }
 
 #[cfg(test)]
@@ -44,26 +55,31 @@ mod tests {
 
     #[test]
     fn html_is_kept_only_with_text() {
-        assert_eq!(capture("{{loop EQP}}\t", TABLE).as_deref(), Some(TABLE));
-        assert_eq!(capture("", TABLE), None);
-        assert_eq!(capture("text", ""), None);
+        assert_eq!(entry("{{loop EQP}}\t", TABLE), Some(Some(TABLE.to_string())));
+        assert_eq!(entry("text", ""), Some(None));
+        assert_eq!(entry("", TABLE), None);
     }
 
     #[test]
-    fn taken_once() {
+    fn pastes_of_one_frame_each_take_their_own_html() {
         let slot = Slot::default();
-        *slot.borrow_mut() = Some(TABLE.into());
-        assert_eq!(take(&slot).as_deref(), Some(TABLE));
+        push(&slot, "a", "<b>1</b>");
+        push(&slot, "b", "");
+        push(&slot, "", "<i>no text: no paste</i>");
+        push(&slot, "c", "<b>3</b>");
+        assert_eq!(take(&slot).as_deref(), Some("<b>1</b>"));
+        assert_eq!(take(&slot), None, "the second paste had no HTML");
+        assert_eq!(take(&slot).as_deref(), Some("<b>3</b>"));
         assert_eq!(take(&slot), None);
     }
 
     #[test]
     fn a_frame_without_a_paste_event_empties_the_slot() {
         let slot = Slot::default();
-        *slot.borrow_mut() = Some(TABLE.into());
+        push(&slot, "x", TABLE);
         expire(&slot, &[egui::Event::Paste("x".into())]);
-        assert!(slot.borrow().is_some(), "the paste is still to be handled");
+        assert_eq!(slot.borrow().len(), 1, "the paste is still to be handled");
         expire(&slot, &[egui::Event::Copy]);
-        assert!(slot.borrow().is_none(), "no paste arrived: drop the old copy");
+        assert!(slot.borrow().is_empty(), "no paste arrived: drop the old copy");
     }
 }

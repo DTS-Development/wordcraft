@@ -226,7 +226,27 @@ mod tests {
         assert!(slot.borrow().is_none());
     }
 
-    /// Keep Text Only and a paste with no HTML stay text.
+    /// Copying in the editor and pasting with the same text keeps the editor's own copy, whatever
+    /// HTML the browser also holds (#136); text that differs (another program copied since)
+    /// takes the HTML.
+    #[test]
+    fn own_copy_wins_over_browser_html_only_for_the_same_text() {
+        use wordcraft_doc::Block;
+        const HTML: &str = "<table><tr><td>x</td></tr></table>";
+        let services = Services { clipboard_html: Some(Box::new(|| Some(HTML.into()))), ..Default::default() };
+        let mut a = app(services);
+        a.run("text.insert", json!({"text": "plain"})).unwrap();
+        a.run("select.all", json!({})).unwrap();
+        a.run("edit.copy", json!({})).unwrap();
+        a.run("caret.docEnd", json!({})).unwrap();
+        let tables = |a: &WordApp| a.session.doc.body.iter().filter(|b| matches!(&***b, Block::Table(_))).count();
+        a.run("edit.paste", json!({"text": "plain"})).unwrap();
+        assert_eq!(tables(&a), 0, "the same text: the editor's own copy");
+        a.run("edit.paste", json!({"text": "from another program"})).unwrap();
+        assert_eq!(tables(&a), 1, "other text: the HTML");
+    }
+
+    /// Keep Text Only (`edit.pasteText`, Mod+Alt+Shift+V) stays text though HTML is waiting, and so does a paste with no HTML.
     #[test]
     fn browser_paste_without_html_or_as_text_stays_text() {
         use wordcraft_doc::Block;
