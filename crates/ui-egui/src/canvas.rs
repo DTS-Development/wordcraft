@@ -1514,9 +1514,6 @@ pub fn show(app: &mut WordApp, ui: &mut Ui) {
             let y1 = y0 + c.height * scale;
             let since = crate::now_ms() - app.canvas.caret_visible_since;
             let on = ((since / 530.0) as u64).is_multiple_of(2);
-            // The caret contrasts with what lies under it, like Word's inverted caret (#299):
-            // worked out only when something is drawn in it.
-            let caret_color = |app: &mut WordApp| caret_color_at(app, &layout, c.page, c.x + c.width / 2.0, c.top + c.height / 2.0, view, dim_body);
             // While composing, the caret sits at the end of the composition (as in Word); the
             // candidate window stays at the composition's start.
             let preedit_w = if app.canvas.ime_preedit.is_empty() {
@@ -1541,9 +1538,17 @@ pub fn show(app: &mut WordApp, ui: &mut Ui) {
                     );
                     ui.ctx().request_repaint();
                 }
-                let color = caret_color(app);
-                painter.layout_no_wrap(app.canvas.ime_preedit.clone(), regular(c.height * scale * 0.8), color).size().x
+                // Only the width is wanted here; the colour is worked out below.
+                painter.layout_no_wrap(app.canvas.ime_preedit.clone(), regular(c.height * scale * 0.8), Color32::PLACEHOLDER).size().x
             };
+            // The caret contrasts with what lies under it, like Word's inverted caret (#299), worked out
+            // once for the bar and the composition, at the caret's drawn place (past the composition),
+            // and only when something is drawn in it.
+            let shown = app.session.sel.is_collapsed() && focused;
+            let caret_color = (shown || preedit_w > 0.0).then(|| {
+                let end = if c.width > 0.0 { 0.0 } else { preedit_w / scale };
+                caret_color_at(app, &layout, c.page, c.x + end + c.width / 2.0, c.top + c.height / 2.0, view, dim_body)
+            });
             let bar = if c.width > 0.0 {
                 // Turned text (a table cell's text direction): the caret lies across the page.
                 [pos2(x, y0.round() + 0.5), pos2(x + c.width * scale, y0.round() + 0.5)]
@@ -1551,10 +1556,9 @@ pub fn show(app: &mut WordApp, ui: &mut Ui) {
                 [pos2(caret_x(x, preedit_w), y0), pos2(caret_x(x, preedit_w), y1)]
             };
             // The caret glides and fades like Word's (`caret_glide`).
-            let shown = app.session.sel.is_collapsed() && focused;
             let look = crate::caret_glide::look(app, ui, content_origin, &geo, bar, shown, since, on);
             if shown && look.opacity > 0.0 {
-                painter.line_segment(look.bar, Stroke::new(1.5, caret_color(app).gamma_multiply(look.opacity)));
+                painter.line_segment(look.bar, Stroke::new(1.5, caret_color.unwrap_or(Color32::BLACK).gamma_multiply(look.opacity)));
             }
             if focused {
                 ui.ctx().request_repaint_after(std::time::Duration::from_millis(530 - (since as u64 % 530)));
@@ -1572,7 +1576,7 @@ pub fn show(app: &mut WordApp, ui: &mut Ui) {
                 });
             }
             if !app.canvas.ime_preedit.is_empty() {
-                let caret_color = caret_color(app);
+                let caret_color = caret_color.unwrap_or(Color32::BLACK);
                 let g = painter.text(pos2(x, y1), egui::Align2::LEFT_BOTTOM, &app.canvas.ime_preedit, regular(c.height * scale * 0.8), caret_color);
                 painter.line_segment([pos2(g.min.x, g.max.y), pos2(g.max.x, g.max.y)], Stroke::new(1.0, caret_color));
             }
@@ -3381,14 +3385,14 @@ fn caret_x(x: f32, preedit_w: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn caret_x_follows_composition() {
-        assert_eq!(super::caret_x(10.2, 0.0), 10.5);
-        assert_eq!(super::caret_x(10.2, 14.0), 24.5);
-    }
-
     use super::*;
     use crate::table_resize::tests::{H, cell, screen, steps, table_window};
+
+    #[test]
+    fn caret_x_follows_composition() {
+        assert_eq!(caret_x(10.2, 0.0), 10.5);
+        assert_eq!(caret_x(10.2, 14.0), 24.5);
+    }
 
     /// A window-following layout size (#1876, Read Mode): applied at once on entry or when forced,
     /// held while the window is dragged, applied once the size has been still for the settle time.
