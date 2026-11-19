@@ -190,6 +190,75 @@ mod tests {
         assert_eq!(ids, ["html", "text"]);
     }
 
+    /// The browser shell (#136) hands the paste event's `text/html` over through `clipboard_html`;
+    /// the table shi sends becomes a table, its `{{...}}` text staying in the cells, and the
+    /// paragraph it lands in is split around it.
+    #[test]
+    fn browser_html_table_paste_makes_a_table() {
+        use std::{cell::RefCell, rc::Rc};
+        use wordcraft_doc::Block;
+        const HTML: &str = "<table><tr><td>{{loop EQP}}</td><td></td></tr><tr><td>{{EQP_NAME}}</td><td>{{EQP_WEIGHT}}</td></tr><tr><td>{{endloop}}</td><td></td></tr></table>";
+        const TEXT: &str = "{{loop EQP}}\t\n{{EQP_NAME}}\t{{EQP_WEIGHT}}\n{{endloop}}\t";
+        let slot = Rc::new(RefCell::new(Some(HTML.to_string())));
+        let take = slot.clone();
+        let services = Services { clipboard_html: Some(Box::new(move || take.borrow_mut().take())), ..Default::default() };
+        let mut a = app(services);
+        a.run("text.insert", json!({"text": "beforeafter"})).unwrap();
+        a.run("select.range", json!({"anchor": {"block": 0, "off": 6}, "focus": {"block": 0, "off": 6}})).unwrap();
+        // Ctrl+V: the paste event carries the text, the hook the HTML.
+        a.run("edit.paste", json!({"text": TEXT})).unwrap();
+        let blocks = &a.session.doc.body;
+        let tables: Vec<_> = blocks.iter().filter_map(|b| if let Block::Table(t) = &**b { Some(t) } else { None }).collect();
+        assert_eq!(tables.len(), 1, "one table, not tab-separated lines");
+        let t = tables[0];
+        assert_eq!(t.rows.len(), 3);
+        let cell_text = |r: usize, c: usize| match &*t.rows[r].cells[c].blocks[0] {
+            Block::Para(p) => p.text.clone(),
+            _ => String::new(),
+        };
+        assert_eq!(cell_text(0, 0), "{{loop EQP}}");
+        assert_eq!(cell_text(0, 1), "");
+        assert_eq!(cell_text(1, 1), "{{EQP_WEIGHT}}");
+        assert_eq!(cell_text(2, 0), "{{endloop}}");
+        let paras: Vec<String> = blocks.iter().filter_map(|b| if let Block::Para(p) = &**b { Some(p.text.clone()) } else { None }).collect();
+        assert!(paras.first().is_some_and(|p| p == "before") && paras.iter().any(|p| p == "after"), "{paras:?}");
+        // The slot was taken: the next paste has no HTML and is the text alone.
+        assert!(slot.borrow().is_none());
+    }
+
+    /// Copying in the editor and pasting with the same text keeps the editor's own copy, whatever
+    /// HTML the browser also holds (#136); text that differs (another program copied since)
+    /// takes the HTML.
+    #[test]
+    fn own_copy_wins_over_browser_html_only_for_the_same_text() {
+        use wordcraft_doc::Block;
+        const HTML: &str = "<table><tr><td>x</td></tr></table>";
+        let services = Services { clipboard_html: Some(Box::new(|| Some(HTML.into()))), ..Default::default() };
+        let mut a = app(services);
+        a.run("text.insert", json!({"text": "plain"})).unwrap();
+        a.run("select.all", json!({})).unwrap();
+        a.run("edit.copy", json!({})).unwrap();
+        a.run("caret.docEnd", json!({})).unwrap();
+        let tables = |a: &WordApp| a.session.doc.body.iter().filter(|b| matches!(&***b, Block::Table(_))).count();
+        a.run("edit.paste", json!({"text": "plain"})).unwrap();
+        assert_eq!(tables(&a), 0, "the same text: the editor's own copy");
+        a.run("edit.paste", json!({"text": "from another program"})).unwrap();
+        assert_eq!(tables(&a), 1, "other text: the HTML");
+    }
+
+    /// Keep Text Only (`edit.pasteText`, Mod+Alt+Shift+V) stays text though HTML is waiting, and so does a paste with no HTML.
+    #[test]
+    fn browser_paste_without_html_or_as_text_stays_text() {
+        use wordcraft_doc::Block;
+        let services = Services { clipboard_html: Some(Box::new(|| Some("<table><tr><td>a</td></tr></table>".into()))), ..Default::default() };
+        let mut a = app(services);
+        a.run("edit.pasteText", json!({"text": "a\tb"})).unwrap();
+        assert!(!a.session.doc.body.iter().any(|b| matches!(&**b, Block::Table(_))));
+        let mut a = app(Services::default());
+        a.run("edit.paste", json!({"text": "a\tb"})).unwrap();
+        assert!(!a.session.doc.body.iter().any(|b| matches!(&**b, Block::Table(_))));
+    }
+
     /// RTF is used where the clipboard has no HTML; oversized payloads are dropped, not pasted.
     #[test]
     fn rtf_and_oversized_clipboard_payloads() {

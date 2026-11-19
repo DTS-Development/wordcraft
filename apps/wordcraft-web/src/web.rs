@@ -69,7 +69,8 @@ pub fn start() {
                     }
                     let inbox: Inbox = Inbox::default();
                     let pasted: Inbox = Inbox::default();
-                    if let Err(e) = listen_for_pasted_pictures(pasted.clone(), cc.egui_ctx.clone()) {
+                    let paste_html = crate::paste_html::Slot::default();
+                    if let Err(e) = listen_for_pasted_pictures(pasted.clone(), paste_html.clone(), cc.egui_ctx.clone()) {
                         log::error!("pasting pictures is unavailable: {e}");
                     }
                     // The browser's locale picks the new document's paper, the units and the
@@ -82,6 +83,9 @@ pub fn start() {
                     session.system_region = region;
                     let messages = Rc::new(RefCell::new(Vec::new()));
                     let mut services = services(inbox.clone(), cc.egui_ctx.clone(), dirty, saves.clone(), messages.clone());
+                    // Paste keeps the formatting of the browser's `text/html` (#136), as the desktop's does.
+                    let html_slot = paste_html.clone();
+                    services.clipboard_html = Some(Box::new(move || crate::paste_html::take(&html_slot)));
                     if host {
                         lock_services(&mut services);
                         session.lock_to_host();
@@ -114,7 +118,7 @@ pub fn start() {
                         }
                         bridge.post_ready();
                     }
-                    Ok(Box::new(WebShell { app, inbox, messages, prefs, bridge: app_bridge, host }))
+                    Ok(Box::new(WebShell { app, inbox, messages, prefs, bridge: app_bridge, host, paste_html }))
                 }),
             )
             .await;
@@ -148,6 +152,8 @@ struct WebShell {
     bridge: Option<crate::host::Bridge>,
     /// Locked to the parent page: files dropped on the window are refused.
     host: bool,
+    /// The `text/html` of a paste the app has not handled yet ([`crate::paste_html`]).
+    paste_html: crate::paste_html::Slot,
 }
 
 fn local_storage() -> Option<web_sys::Storage> {
@@ -202,6 +208,7 @@ impl eframe::App for WebShell {
 
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw: &mut egui::RawInput) {
         crate::clipboard_keys::drop_clipboard_key_presses(&mut raw.events);
+        crate::paste_html::expire(&self.paste_html, &raw.events);
         self.app.raw_input_hook(raw);
     }
 
@@ -221,13 +228,17 @@ const MAX_PASTED_PICTURES: u32 = 20;
 
 /// Pasting a picture (#45): eframe's paste handler only reads text, so a clipboard holding just
 /// pictures (a screenshot, a browser's Copy Image) is read here and the pictures arrive through
-/// the app's `pasted` queue, which inserts them only when the page is the edit target (#1349). A clipboard with text is left to eframe.
-fn listen_for_pasted_pictures(inbox: Inbox, ctx: egui::Context) -> Result<(), String> {
+/// the app's `pasted` queue, which inserts them only when the page is the edit target (#1349). A clipboard with text is left to eframe,
+/// but its `text/html` is kept for the Paste that eframe's event starts (#136, [`crate::paste_html`]).
+fn listen_for_pasted_pictures(inbox: Inbox, html: crate::paste_html::Slot, ctx: egui::Context) -> Result<(), String> {
     let document = web_sys::window().and_then(|w| w.document()).ok_or("no document")?;
     let on_paste = wasm_bindgen::closure::Closure::<dyn FnMut(web_sys::ClipboardEvent)>::new(move |e: web_sys::ClipboardEvent| {
         // The target is always eframe's hidden text input while the page has focus; the app decides (#1349).
         let Some(data) = e.clipboard_data() else { return };
-        if !data.get_data("text").unwrap_or_default().is_empty() {
+        // Each paste queues its own HTML, next to the paste eframe queues.
+        let text = data.get_data("text").unwrap_or_default();
+        crate::paste_html::push(&html, &text, &data.get_data("text/html").unwrap_or_default());
+        if !text.is_empty() {
             return;
         }
         let Some(files) = data.files() else { return };
