@@ -1487,11 +1487,11 @@ pub fn show(app: &mut WordApp, ui: &mut Ui) {
                 // The caret glides and fades like Word's (`caret_glide`).
                 let on = ((since / 530.0) as u64).is_multiple_of(2);
                 let look = crate::caret_glide::look(app, ui, content_origin, &geo, [pos2(x, y0), pos2(x, y1)], focused, since, on);
-                if look.opacity > 0.0 && focused {
+                if look.opacity > 0.0 && focused && !app.read_only() {
                     let caret_color = caret_color_at(app, &layout, pi, ex + slot.x, base - slot.y + (slot.d - slot.a) / 2.0, view, dim_body);
                     painter.line_segment(look.bar, Stroke::new(1.5, caret_color.gamma_multiply(look.opacity)));
                 }
-                if focused {
+                if focused && !app.read_only() {
                     ui.ctx().request_repaint_after(std::time::Duration::from_millis(530 - (since as u64 % 530)));
                     let cr = Rect::from_min_max(pos2(x, y0), pos2(x + 1.0, y1));
                     ui.ctx().output_mut(|o| {
@@ -1545,7 +1545,8 @@ pub fn show(app: &mut WordApp, ui: &mut Ui) {
             // The caret contrasts with what lies under it, like Word's inverted caret (#299), worked out
             // once for the bar and the composition, at the caret's drawn place (past the composition),
             // and only when something is drawn in it.
-            let shown = app.session.sel.is_collapsed() && focused;
+            // A view-only page has no caret to blink (the selection still shows).
+            let shown = app.session.sel.is_collapsed() && focused && !app.read_only();
             let caret_color = (shown || preedit_w > 0.0).then(|| {
                 let end = if c.width > 0.0 { 0.0 } else { preedit_w / scale };
                 caret_color_at(app, &layout, c.page, c.x + end + c.width / 2.0, c.top + c.height / 2.0, view, dim_body)
@@ -1561,12 +1562,13 @@ pub fn show(app: &mut WordApp, ui: &mut Ui) {
             if shown && look.opacity > 0.0 {
                 painter.line_segment(look.bar, Stroke::new(1.5, caret_color.unwrap_or(Color32::BLACK).gamma_multiply(look.opacity)));
             }
-            if focused {
+            let typing = focused && !app.read_only();
+            if typing {
                 ui.ctx().request_repaint_after(std::time::Duration::from_millis(530 - (since as u64 % 530)));
             }
             // IME candidate window placement.
             let cr = Rect::from_min_max(pos2(x, y0), pos2(x + 1.0, y1));
-            if focused {
+            if typing {
                 ui.ctx().output_mut(|o| {
                     o.ime = Some(egui::output::IMEOutput {
                         rect: cr,

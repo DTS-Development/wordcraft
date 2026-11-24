@@ -640,6 +640,10 @@ pub struct WordApp {
     /// Host mode: the policy in force before a parent document's own policy was set, put back if
     /// that document is not opened (Save Changes cancelled, or ended without opening).
     host_policy_undo: Option<wordcraft_engine::host_policy::HostPolicy>,
+    /// Host mode: the view options (read only, chrome, zoom controls) of a parent document that is
+    /// still waiting to open. They apply once it has opened, so the document on screen keeps its
+    /// own options while a Save Changes prompt waits.
+    host_view_next: Option<(bool, bool, bool)>,
     /// Host mode: a document from the parent has opened (the blank start document doesn't count).
     host_opened: bool,
     /// The file dialog the host is showing, and what its answer is for ([`file_dialogs`]).
@@ -746,6 +750,7 @@ impl WordApp {
             saves_in_flight: Vec::new(),
             awaiting_save: None,
             host_policy_undo: None,
+            host_view_next: None,
             host_opened: false,
             change_picture_target: None,
             recipient_list_pending: false,
@@ -1249,7 +1254,11 @@ impl WordApp {
             match &r {
                 Ok(v) => {
                     self.host_policy_undo = None;
-                    self.host_opened |= v.get("pending").is_none();
+                    let opened = v.get("pending").is_none();
+                    self.host_opened |= opened;
+                    if opened {
+                        self.apply_host_view();
+                    }
                 }
                 Err(e) if !wordcraft_engine::io::needs_password(e) => self.drop_host_open(),
                 Err(_) => {}
@@ -2360,6 +2369,9 @@ impl WordApp {
                     chrome::status_bar(self, ui);
                     panes::show(self, ui);
                 }
+            } else {
+                // The Navigation pane is how a hidden-chrome page is searched (Ctrl+F opens it).
+                panes::nav_pane(self, ui, &t);
             }
             egui::CentralPanel::default().frame(egui::Frame::NONE.fill(t.canvas)).show(ui, |ui| {
                 canvas::show(self, ui);
@@ -2515,8 +2527,12 @@ impl WordApp {
             let Some((name, bytes)) = file else { return };
             // The policy arrives with the open message; a message without one means no switch changed.
             let policy = self.services.host_policy.as_ref().and_then(|slot| slot.lock().unwrap_or_else(|e| e.into_inner()).pop_front());
-            self.host_policy_undo = Some(self.session.host_policy().clone());
-            self.session.set_host_policy(policy.unwrap_or_default());
+            let before = self.session.host_policy().clone();
+            let next = policy.unwrap_or_default();
+            // The open's policy goes on now; its view options wait for the open to succeed.
+            self.host_view_next = Some((next.read_only(), !next.chrome_hidden(), next.zoom_controls()));
+            self.session.set_host_policy(next.with_view(before.read_only(), !before.chrome_hidden(), before.zoom_controls()));
+            self.host_policy_undo = Some(before);
             // The user's own Open is blocked in host mode; the parent's document is the one open
             // that passes the lock (it stays armed while a Save Changes prompt waits).
             self.session.arm_host_open(&name);
@@ -2541,9 +2557,18 @@ impl WordApp {
         self.dialog.is_some() || self.awaiting_save.is_some() || self.file_dialog_open()
     }
 
+    /// The parent document opened: its view options replace the previous document's.
+    fn apply_host_view(&mut self) {
+        if let Some((read_only, chrome, zoom)) = self.host_view_next.take() {
+            let policy = self.session.host_policy().clone().with_view(read_only, chrome, zoom);
+            self.session.set_host_policy(policy);
+        }
+    }
+
     /// Give up the armed parent document and put the earlier policy back, so a document that did
     /// not open leaves the open one with its own policy.
     fn drop_host_open(&mut self) {
+        self.host_view_next = None;
         self.session.disarm_host_open();
         if let Some(before) = self.host_policy_undo.take() {
             self.session.set_host_policy(before);
@@ -7744,6 +7769,18 @@ mod tests {
         assert!(a.dialog.is_some());
         a.answer_save_changes(SaveChoice::Cancel).unwrap();
         assert!(body(&a).contains("unsaved") && !a.read_only() && !a.chrome_hidden(), "the cancelled open left no options behind");
+        // While the Save Changes prompt waits, the open document is still editable and reported dirty.
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = seen.clone();
+        a.services.on_dirty = Some(Box::new(move |d| log.lock().unwrap().push(d)));
+        queue_host_file(&host, &slot, ("d.txt".into(), b"fourth".to_vec()), view_only());
+        a.drain_host_inbox();
+        assert!(a.dialog.is_some());
+        assert!(!a.read_only() && !a.chrome_hidden(), "the waiting open's options are not on yet");
+        assert!(a.session.read_only_check("file.save", false).is_ok(), "the open document can still be saved");
+        a.report_dirty();
+        assert_eq!(seen.lock().unwrap().last(), Some(&true), "the host still hears the open document is dirty");
+        a.answer_save_changes(SaveChoice::Cancel).unwrap();
         // A failed open after Don't Save does the same.
         queue_host_file(&host, &slot, ("bad.docx".into(), b"not a zip".to_vec()), view_only());
         a.drain_host_inbox();
@@ -7807,6 +7844,33 @@ mod tests {
         h.event(key(egui::Key::A, egui::Modifiers::COMMAND));
         h.step();
         assert!(!h.state().session.sel.is_collapsed(), "select all still works");
+    }
+
+    /// `chrome: false` still searches: Ctrl+F opens the Navigation pane, the one pane kept.
+    #[test]
+    fn hidden_chrome_keeps_the_find_pane() {
+        let mut a = WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::from_text("Some text")), Default::default());
+        a.session.set_host_policy(view_only());
+        a.canvas.want_focus = true;
+        let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1440.0, 900.0)).build_ui_state(
+            |ui, app: &mut WordApp| {
+                let ctx = ui.ctx().clone();
+                app.logic(&ctx);
+                app.ui(ui);
+            },
+            a,
+        );
+        for _ in 0..6 {
+            h.step();
+        }
+        assert!(!h.state().session.view.nav_pane);
+        h.event(egui::Event::Key { key: egui::Key::F, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::COMMAND });
+        for _ in 0..3 {
+            h.step();
+        }
+        assert!(h.state().session.view.nav_pane, "Ctrl+F opened the Navigation pane");
+        assert!(h.state().chrome_hidden() && h.state().read_only());
+        assert!(h.query_by_label("Navigation").is_some() || h.query_by_label_contains("Navigation").is_some(), "the pane is drawn");
     }
 
     /// View-only: the context menu and the dialogs that edit are not offered.

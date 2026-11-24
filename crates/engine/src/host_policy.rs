@@ -234,8 +234,19 @@ impl HostPolicy {
 /// Commands a view-only session refuses besides every mutating one: Save (nothing is written,
 /// whatever the parent's policy) and the ones that change the document without being marked
 /// `mutates`. `read_only_session_refuses_every_edit` finds the rest.
-const READ_ONLY_REFUSED: &[&str] =
-    &["file.save", "file.saveAs", "file.autosave", "insert.editFooter", "insert.editHeader", "edit.undo", "edit.undoTo", "edit.redo", "edit.repeat"];
+const READ_ONLY_REFUSED: &[&str] = &[
+    "file.save",
+    "file.saveAs",
+    "file.autosave",
+    "insert.editFooter",
+    "insert.editHeader",
+    "edit.undo",
+    "edit.undoTo",
+    "edit.redo",
+    "edit.repeat",
+    "file.encrypt",
+    "file.rename",
+];
 
 /// The grade of engine command `id`; `None` for one in no table (refused until it is added, and
 /// `every_command_is_classified` fails).
@@ -629,7 +640,21 @@ mod tests {
         for locked_too in [false, true] {
             for spec in crate::cmd::registry().all() {
                 // These reach outside the session (files, windows); the lock tests cover them.
-                if spec.id.starts_with("file.") && !READ_ONLY_REFUSED.contains(&spec.id) {
+                if matches!(
+                    spec.id,
+                    "file.open"
+                        | "file.new"
+                        | "file.newFromTemplate"
+                        | "file.close"
+                        | "file.recover"
+                        | "file.exportPdf"
+                        | "file.exportPng"
+                        | "file.print"
+                        | "file.printMarkup"
+                        | "file.printPdf"
+                        | "file.saveTemplate"
+                        | "file.share"
+                ) {
                     continue;
                 }
                 if matches!(spec.id, "insert.picture" | "insert.textFromFile") {
