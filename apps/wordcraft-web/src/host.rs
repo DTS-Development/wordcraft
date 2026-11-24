@@ -1,7 +1,7 @@
 //! The `postMessage` bridge to a same-origin parent page (`?host=parent`), for pages that embed
 //! WordCraft in an `<iframe>`. Messages are plain objects with a `type`:
 //!
-//! - `wordcraft:ready` (to the parent): `{ version }`, the app is listening; send a file now.
+//! - `wordcraft:ready` (to the parent): `{ version, openOptions }`, openOptions the open options this build understands, the app is listening; send a file now.
 //! - `wordcraft:open` (from the parent): `{ name, bytes, policy? }`, bytes an `ArrayBuffer` or
 //!   `Uint8Array`. It opens like a document picked with File › Open or dropped on the window.
 //!   `policy: { overrides: { "<command id>": true | false } }` switches commands for this document
@@ -65,7 +65,7 @@ use wordcraft_ui_egui::{HostPolicySlot, Inbox, Services, WordApp, queue_host_fil
 
 /// The open options this app understands, sent with `ready` so the parent can tell an older
 /// build (which would open a `readOnly` document editable) from this one.
-const FEATURES: [&str; 3] = ["readOnly", "chrome", "zoomControls"];
+const OPEN_OPTIONS: [&str; 3] = ["readOnly", "chrome", "zoomControls"];
 
 /// The reason (`bytes-failed`) and error (`table-failed`) for a request a view-only document refuses.
 const READ_ONLY: &str = "read-only";
@@ -218,8 +218,8 @@ impl Bridge {
     }
 
     pub fn post_ready(&self) {
-        let features: js_sys::Array = FEATURES.iter().map(|f| JsValue::from_str(f)).collect();
-        self.send(&[("type", "wordcraft:ready".into()), ("version", env!("CARGO_PKG_VERSION").into()), ("features", features.into())]);
+        let open_options: js_sys::Array = OPEN_OPTIONS.iter().map(|f| JsValue::from_str(f)).collect();
+        self.send(&[("type", "wordcraft:ready".into()), ("version", env!("CARGO_PKG_VERSION").into()), ("openOptions", open_options.into())]);
     }
 
     pub fn post_failed(&self, error: &str) {
