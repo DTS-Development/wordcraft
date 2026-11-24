@@ -1029,6 +1029,10 @@ impl Dialog {
     }
 
     pub fn open(name: &str, app: &mut WordApp) -> Option<Dialog> {
+        // View-only: only the dialogs that read the document open (Find, Go To, Word Count).
+        if app.read_only() && !matches!(name, "find" | "goto" | "wordCount") {
+            return None;
+        }
         // Host mode: dialogs that pick files, templates or mail-merge data don't open.
         if app.host_locked() && crate::host_lock::BLOCKED_DIALOGS.contains(&name) {
             return None;

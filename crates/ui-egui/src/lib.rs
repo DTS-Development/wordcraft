@@ -875,6 +875,18 @@ impl WordApp {
         self.session.is_host_locked()
     }
 
+    /// Whether the open document is view-only (the parent's `readOnly`): input that would edit
+    /// is dropped here, and the engine refuses the commands behind it.
+    pub fn read_only(&self) -> bool {
+        self.session.host_policy().read_only()
+    }
+
+    /// Whether the parent hid the chrome (`chrome: false`): title bar, ribbon, status bar, side
+    /// panes and ruler. The session's own view settings stay as they are.
+    pub fn chrome_hidden(&self) -> bool {
+        self.session.host_policy().chrome_hidden()
+    }
+
     /// Whether links may open other sites: always outside host mode, in host mode only when the
     /// parent's policy switched on `ui.externalLinks`.
     pub fn links_allowed(&self) -> bool {
@@ -884,6 +896,12 @@ impl WordApp {
     /// `Err` when the host lock refuses command `id` (engine commands by the engine's allowlist,
     /// `ui.*` by [`host_lock`]). Silent: no status message, the control is just absent.
     fn host_refusal(&self, id: &str, params: &Value) -> Result<(), String> {
+        // View-only: an editing command is absent from the ribbon and menus and never runs; the
+        // answer is the same for a shortcut, command search or a script.
+        if self.read_only() {
+            let mutates = self.session.registry.get(id).is_some_and(|spec| spec.mutates);
+            self.session.read_only_check(id, mutates).map_err(|_| wordcraft_engine::host_policy::READ_ONLY_TEXT.to_string())?;
+        }
         if !self.session.is_host_locked() {
             return Ok(());
         }
@@ -2207,7 +2225,8 @@ impl WordApp {
     /// Tell the host whether the document has unsaved changes ([`Services::on_dirty`]).
     fn report_dirty(&self) {
         if let Some(f) = &self.services.on_dirty {
-            f(self.session.dirty || panes::has_comment_drafts(self));
+            // A view-only document is never reported as changed, even by a draft in a pane.
+            f(!self.read_only() && (self.session.dirty || panes::has_comment_drafts(self)));
         }
     }
 
@@ -2320,6 +2339,10 @@ impl WordApp {
         if self.session.view.focus_mode && self.dialog.is_none() && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
             let _ = self.run("view.focus", json!({"value": false}));
         }
+        // `chrome: false` has no File tab to come back from: the File page stays shut.
+        if self.chrome_hidden() {
+            self.ui.backstage = false;
+        }
         if self.ui.backstage {
             backstage::show(self, ui);
         } else if !self.has_document() {
@@ -2329,16 +2352,20 @@ impl WordApp {
             chrome::status_bar(self, ui);
             egui::CentralPanel::default().frame(egui::Frame::NONE.fill(t.canvas)).show(ui, |_| {});
         } else {
-            chrome::title_bar(self, ui);
-            if !self.session.view.focus_mode {
-                ribbon::show(self, ui);
-                chrome::status_bar(self, ui);
-                panes::show(self, ui);
+            // `chrome: false` shows the page alone (the zoom control, if asked for, is over it).
+            if !self.chrome_hidden() {
+                chrome::title_bar(self, ui);
+                if !self.session.view.focus_mode {
+                    ribbon::show(self, ui);
+                    chrome::status_bar(self, ui);
+                    panes::show(self, ui);
+                }
             }
             egui::CentralPanel::default().frame(egui::Frame::NONE.fill(t.canvas)).show(ui, |ui| {
                 canvas::show(self, ui);
             });
         }
+        chrome::zoom_overlay(self, &ctx);
         content_controls::popup(self, &ctx);
         dialogs::show(self, &ctx);
         #[cfg(not(target_arch = "wasm32"))]
@@ -2528,6 +2555,10 @@ impl WordApp {
     fn drain_pasted(&mut self) {
         let Some(pasted) = self.services.pasted.clone() else { return };
         let pictures = std::mem::take(&mut *pasted.lock().unwrap_or_else(|e| e.into_inner()));
+        // View-only: a picture pasted in the browser is dropped, the way it is outside the page.
+        if self.read_only() {
+            return;
+        }
         let target = paste_target(self.canvas.focused, self.ui.backstage, self.dialog.is_some() || self.file_dialog_open());
         for (_, bytes) in pictures {
             if !target {
@@ -7653,6 +7684,113 @@ mod tests {
         // The first policy left is the fourth one (the only one that switched printing on).
         assert!(slot.lock().unwrap()[0].command_on("file.print"));
         assert!(!slot.lock().unwrap()[1].command_on("file.print"));
+    }
+
+    fn view_only() -> wordcraft_engine::host_policy::HostPolicy {
+        wordcraft_engine::host_policy::HostPolicy::default().with_view(true, false, true)
+    }
+
+    /// View options belong to one document: the next open without them is editable and shows the
+    /// chrome again, and an open that is cancelled leaves the open document's own options.
+    #[test]
+    fn view_only_options_follow_their_document() {
+        use wordcraft_engine::host_policy::HostPolicy;
+        let mut a = locked_app();
+        let (host, slot) = (Inbox::default(), HostPolicySlot::default());
+        a.services.host_inbox = Some(host.clone());
+        a.services.host_policy = Some(slot.clone());
+        queue_host_file(&host, &slot, ("a.txt".into(), b"first".to_vec()), view_only());
+        a.drain_host_inbox();
+        assert!(body(&a).contains("first") && a.read_only() && a.chrome_hidden(), "the document opened view-only");
+        assert!(a.run("text.insert", json!({"text": "x"})).is_err());
+        assert!(!body(&a).contains('x') && !a.session.dirty);
+        // No options in the next open: back to the defaults.
+        queue_host_file(&host, &slot, ("b.txt".into(), b"second".to_vec()), HostPolicy::default());
+        a.drain_host_inbox();
+        assert!(body(&a).contains("second") && !a.read_only() && !a.chrome_hidden());
+        a.run("text.insert", json!({"text": "unsaved"})).unwrap();
+        // A view-only open that is cancelled gives the editable document its options back.
+        queue_host_file(&host, &slot, ("c.txt".into(), b"third".to_vec()), view_only());
+        a.drain_host_inbox();
+        assert!(a.dialog.is_some());
+        a.answer_save_changes(SaveChoice::Cancel).unwrap();
+        assert!(body(&a).contains("unsaved") && !a.read_only() && !a.chrome_hidden(), "the cancelled open left no options behind");
+        // A failed open after Don't Save does the same.
+        queue_host_file(&host, &slot, ("bad.docx".into(), b"not a zip".to_vec()), view_only());
+        a.drain_host_inbox();
+        let _ = a.answer_save_changes(SaveChoice::DontSave);
+        assert!(!a.read_only() && !a.chrome_hidden(), "the failed open's options were given back");
+    }
+
+    /// A view-only document is never reported as changed.
+    #[test]
+    fn view_only_never_reports_dirty() {
+        let mut a = locked_app();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = seen.clone();
+        a.services.on_dirty = Some(Box::new(move |d| log.lock().unwrap().push(d)));
+        a.session.set_host_policy(view_only());
+        a.session.dirty = true;
+        a.report_dirty();
+        assert_eq!(*seen.lock().unwrap(), vec![false]);
+    }
+
+    /// Typing, composing, pasting and cutting reach a view-only document and leave it alone, while
+    /// the keys that read (caret, select all, copy) still work.
+    #[test]
+    fn view_only_drops_edits_from_the_keyboard() {
+        let mut a = WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::from_text("Some text")), Default::default());
+        a.session.set_host_policy(view_only());
+        a.canvas.want_focus = true;
+        let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1440.0, 900.0)).build_ui_state(
+            |ui, app: &mut WordApp| {
+                let ctx = ui.ctx().clone();
+                app.logic(&ctx);
+                app.ui(ui);
+            },
+            a,
+        );
+        for _ in 0..6 {
+            h.step();
+        }
+        assert!(h.state().canvas.focused);
+        let key = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
+        for e in [
+            egui::Event::Text("x".into()),
+            egui::Event::Ime(egui::ImeEvent::Preedit { text: "ㅎ".into(), active_range_chars: None }),
+            egui::Event::Ime(egui::ImeEvent::Commit("한".into())),
+            egui::Event::Paste("pasted".into()),
+            egui::Event::Cut,
+            key(egui::Key::Backspace, Default::default()),
+            key(egui::Key::Delete, Default::default()),
+            key(egui::Key::Enter, Default::default()),
+            key(egui::Key::Tab, Default::default()),
+            key(egui::Key::B, egui::Modifiers::COMMAND),
+            key(egui::Key::Z, egui::Modifiers::COMMAND),
+            key(egui::Key::S, egui::Modifiers::COMMAND),
+        ] {
+            h.event(e);
+            h.step();
+        }
+        assert_eq!(body(h.state()), "Some text");
+        assert!(h.state().canvas.ime_preedit.is_empty(), "no composing text is kept to be drawn");
+        assert!(!h.state().session.dirty && h.state().session.undo_depth() == 0);
+        h.event(key(egui::Key::A, egui::Modifiers::COMMAND));
+        h.step();
+        assert!(!h.state().session.sel.is_collapsed(), "select all still works");
+    }
+
+    /// View-only: the context menu and the dialogs that edit are not offered.
+    #[test]
+    fn view_only_offers_no_editing_dialogs() {
+        let mut a = app();
+        a.session.set_host_policy(view_only());
+        for name in ["font", "paragraph", "replace", "link", "insertTable"] {
+            assert!(dialogs::Dialog::open(name, &mut a).is_none(), "{name}");
+        }
+        assert!(dialogs::Dialog::open("find", &mut a).is_some());
+        assert!(a.host_refusal("format.bold", &Value::Null).is_err());
+        assert!(a.host_refusal("edit.copy", &Value::Null).is_ok());
     }
 
     /// Host mode: each platform function that reaches the user's machine is closed.

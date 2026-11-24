@@ -161,6 +161,13 @@ impl Grade {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct HostPolicy {
     overrides: std::collections::BTreeMap<String, bool>,
+    /// View-only open (`readOnly`): the document takes no edit and nothing is saved. Not a
+    /// command switch, so no override turns it off, and it applies even to an unlocked session.
+    read_only: bool,
+    /// `chrome: false`: the app hides its title bar, ribbon, status bar, side panes and ruler.
+    hide_chrome: bool,
+    /// `zoomControls`: with the chrome hidden, a small zoom control stays over the page.
+    zoom_controls: bool,
 }
 
 /// Most overrides one open message may carry (the contract allows 4000); the first ones that
@@ -182,7 +189,31 @@ impl HostPolicy {
     }
 
     pub fn new(overrides: impl IntoIterator<Item = (String, bool)>) -> Self {
-        Self { overrides: overrides.into_iter().collect() }
+        Self { overrides: overrides.into_iter().collect(), ..Self::default() }
+    }
+
+    /// This policy for a view-only open: `read_only`, `chrome` (false hides the chrome) and
+    /// `zoom_controls` come from the open message's own fields, per document.
+    pub fn with_view(mut self, read_only: bool, chrome: bool, zoom_controls: bool) -> Self {
+        self.read_only = read_only;
+        self.hide_chrome = !chrome;
+        self.zoom_controls = zoom_controls;
+        self
+    }
+
+    /// Whether the document is open view-only.
+    pub fn read_only(&self) -> bool {
+        self.read_only
+    }
+
+    /// Whether the title bar, ribbon, status bar, side panes and ruler are hidden.
+    pub fn chrome_hidden(&self) -> bool {
+        self.hide_chrome
+    }
+
+    /// Whether the zoom control shows over the page when the chrome is hidden.
+    pub fn zoom_controls(&self) -> bool {
+        self.zoom_controls
     }
 
     /// Whether a command of this `grade` is available: never when locked, else the override if the
@@ -199,6 +230,11 @@ impl HostPolicy {
         grade(id).is_some_and(|g| self.allows(id, g))
     }
 }
+
+/// Commands a view-only session refuses besides every mutating one: Save (nothing is written,
+/// whatever the parent's policy) and the ones that change the document without being marked
+/// `mutates`. `read_only_session_refuses_every_edit` finds the rest.
+const READ_ONLY_REFUSED: &[&str] = &["file.save", "file.saveAs", "file.autosave", "insert.editFooter", "insert.editHeader"];
 
 /// The grade of engine command `id`; `None` for one in no table (refused until it is added, and
 /// `every_command_is_classified` fails).
@@ -220,6 +256,9 @@ const SAVE_PARAMS_REFUSED: [&str; 2] = ["path", "format"];
 
 /// What a refusal says (the PPM interface is Korean): the command or page is switched off for the parent.
 pub const NOT_AVAILABLE: &str = "PPM에서는 사용할 수 없습니다";
+
+/// What a view-only session says when it refuses an edit.
+pub const READ_ONLY_TEXT: &str = "보기 전용 문서입니다";
 
 /// `Err` says why a locked session refuses `id` with `params` under `policy`: the command's grade
 /// and the parent's override decide, and Save to another name, format or password needs Save As.
@@ -285,6 +324,20 @@ impl Session {
             && self.host_open.as_deref().is_some_and(|n| params.get("path").and_then(Value::as_str) == Some(n))
             && params.get("data").is_some_and(Value::is_string);
         if armed { Ok(()) } else { check(id, params, &self.host_policy) }
+    }
+
+    /// `Err` when a view-only session refuses `id`: it edits (`mutates`), saves, or is listed in
+    /// [`READ_ONLY_REFUSED`]. Checked after the lock and before anything runs, so a policy that
+    /// turns an edit command on does not get it past. `file.open` is neither, so the parent's
+    /// next document opens (the options change with that open).
+    pub fn read_only_check(&self, id: &str, mutates: bool) -> Result<(), String> {
+        if !self.host_policy.read_only() {
+            return Ok(());
+        }
+        if mutates || READ_ONLY_REFUSED.contains(&id) {
+            return Err(READ_ONLY_TEXT.to_string());
+        }
+        Ok(())
     }
 
     /// [`Self::host_check`] as the error [`Session::run`] returns; uses up an armed open.
@@ -551,5 +604,91 @@ mod tests {
                 assert!(!why.contains(NOT_AVAILABLE), "{id} ran a command the lock refuses: {why}");
             }
         }
+    }
+    fn read_only(locked_too: bool) -> Session {
+        let mut s = Session::new(crate::sample::sample_document());
+        if locked_too {
+            s.lock_to_host();
+        }
+        s.set_host_policy(HostPolicy::default().with_view(true, true, false));
+        s
+    }
+
+    /// Every command, with junk and with plausible params, leaves a view-only document, its undo
+    /// history and the dirty flag alone, locked or not, and a policy that turns edits on changes nothing.
+    #[test]
+    fn read_only_session_refuses_every_edit() {
+        let junk = [
+            json!(null),
+            json!({}),
+            json!({"text": "x", "size": 12, "path": "/tmp/x.docx", "value": true, "rows": 2, "cols": 2}),
+            json!({"pos": {"block": 0, "off": 0}, "width": 10.0, "height": 10.0}),
+        ];
+        let mut leaks = std::collections::BTreeSet::new();
+        for locked_too in [false, true] {
+            for spec in crate::cmd::registry().all() {
+                // These reach outside the session (files, windows); the lock tests cover them.
+                if spec.id.starts_with("file.") && !READ_ONLY_REFUSED.contains(&spec.id) {
+                    continue;
+                }
+                if matches!(spec.id, "insert.picture" | "insert.textFromFile") {
+                    continue;
+                }
+                for j in &junk {
+                    let mut s = read_only(locked_too);
+                    // Everything the parent could switch on is on.
+                    let on: Vec<(String, bool)> = ALLOWED.iter().chain(OFF).map(|id| (id.to_string(), true)).collect();
+                    s.set_host_policy(HostPolicy::new(on).with_view(true, true, false));
+                    let (before, depth) = (s.doc.clone(), s.undo_depth());
+                    let r = s.run(spec.id, j);
+                    // A locked session may refuse a command first, with its own text.
+                    if (spec.mutates || READ_ONLY_REFUSED.contains(&spec.id)) && !matches!(&r, Err(CmdError::Disabled(_))) {
+                        leaks.insert(format!("{} ran: {r:?}", spec.id));
+                    }
+                    if s.doc != before || s.undo_depth() != depth || s.dirty {
+                        leaks.insert(format!("{} changed the document, history or dirty flag", spec.id));
+                    }
+                }
+            }
+        }
+        assert!(leaks.is_empty(), "add these to READ_ONLY_REFUSED: {leaks:#?}");
+    }
+
+    /// Reading goes on: caret movement, selection, copy, find and zoom run.
+    #[test]
+    fn read_only_session_still_reads() {
+        let mut s = read_only(true);
+        for id in ["caret.down", "caret.docEnd", "edit.copy", "edit.find", "view.zoom", "document.text"] {
+            let r = s.run(id, &json!({}));
+            assert!(!matches!(&r, Err(CmdError::Disabled(m)) if m == READ_ONLY_TEXT), "{id} was refused as an edit: {r:?}");
+        }
+    }
+
+    /// Save is refused whatever the policy switches, and the parent's next document still opens.
+    #[test]
+    fn read_only_refuses_save_even_when_save_as_is_on() {
+        let mut s = read_only(true);
+        s.set_host_policy(HostPolicy::new([("file.saveAs".to_string(), true)]).with_view(true, true, false));
+        for id in ["file.save", "file.saveAs"] {
+            assert!(matches!(s.run(id, &json!({})), Err(CmdError::Disabled(m)) if m == READ_ONLY_TEXT), "{id}");
+        }
+        // Auto-save is locked for the host anyway; either refusal is fine.
+        assert!(matches!(s.run("file.autosave", &json!({})), Err(CmdError::Disabled(_))));
+        s.arm_host_open("next.txt");
+        let r = s.run("file.open", &json!({"path": "next.txt", "data": "bmV4dA=="}));
+        assert!(r.is_ok(), "the parent's document must open view-only: {r:?}");
+    }
+
+    /// A policy without view options is a normal editable session, and the options travel with the policy.
+    #[test]
+    fn view_options_default_off_and_follow_the_policy() {
+        let p = HostPolicy::default();
+        assert!(!p.read_only() && !p.chrome_hidden() && !p.zoom_controls());
+        let v = p.with_view(true, false, true);
+        assert!(v.read_only() && v.chrome_hidden() && v.zoom_controls());
+        let mut s = locked();
+        s.set_host_policy(v);
+        s.set_host_policy(HostPolicy::default());
+        assert!(s.run("text.insert", &json!({"text": "x"})).is_ok(), "the next open without options is editable again");
     }
 }

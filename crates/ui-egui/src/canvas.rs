@@ -964,7 +964,8 @@ pub fn show(app: &mut WordApp, ui: &mut Ui) {
     // View › Switch Modes: dark paper, inverted document colours.
     let dark_page = app.session.view.dark_mode;
     let dark_paper = wordcraft_render::DARK_PAPER;
-    let show_ruler = app.session.view.ruler && app.session.view.mode == wordcraft_layout::ViewMode::Print && !app.session.view.read_mode;
+    let show_ruler =
+        app.session.view.ruler && app.session.view.mode == wordcraft_layout::ViewMode::Print && !app.session.view.read_mode && !app.chrome_hidden();
     let (hruler, vruler, area) = if show_ruler {
         let h = Rect::from_min_max(pos2(full.min.x + RULER, full.min.y), pos2(full.max.x, full.min.y + RULER));
         let v = Rect::from_min_max(pos2(full.min.x, full.min.y + RULER), pos2(full.min.x + RULER, full.max.y));
@@ -2181,7 +2182,8 @@ fn active_balloon(app: &mut WordApp, ui: &mut Ui, painter: &egui::Painter, id: u
 /// Select a comment's balloon (its text gets the keyboard), writing back any edit in the one
 /// selected before.
 pub fn select_balloon(app: &mut WordApp, id: u32) {
-    if app.canvas.balloon == Some(id) {
+    // View-only: a balloon is read, never opened for typing (replies, resolve and delete stay out of reach).
+    if app.canvas.balloon == Some(id) || app.read_only() {
         return;
     }
     deselect_balloon(app);
@@ -3112,7 +3114,9 @@ fn equation_menu(app: &mut WordApp, ui: &mut Ui) {
 }
 
 fn context_menu(app: &mut WordApp, ui: &mut Ui) {
-    if app.session.math.is_some() {
+    // View-only: the menu is Copy and Select All, nothing that edits is drawn.
+    let view_only = app.read_only();
+    if app.session.math.is_some() && !view_only {
         return equation_menu(app, ui);
     }
     ui.set_min_width(220.0);
@@ -3128,6 +3132,11 @@ fn context_menu(app: &mut WordApp, ui: &mut Ui) {
             ui.close();
         }
     };
+    if view_only {
+        item(ui, app, "Copy", "edit.copy", json!({}));
+        item(ui, app, "Select All", "select.all", json!({}));
+        return;
+    }
     if let Some(issue) = app.canvas.context_issue.clone() {
         let sugg: Vec<String> = issue
             .get("suggestions")
