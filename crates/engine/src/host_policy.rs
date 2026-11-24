@@ -234,7 +234,8 @@ impl HostPolicy {
 /// Commands a view-only session refuses besides every mutating one: Save (nothing is written,
 /// whatever the parent's policy) and the ones that change the document without being marked
 /// `mutates`. `read_only_session_refuses_every_edit` finds the rest.
-const READ_ONLY_REFUSED: &[&str] = &["file.save", "file.saveAs", "file.autosave", "insert.editFooter", "insert.editHeader"];
+const READ_ONLY_REFUSED: &[&str] =
+    &["file.save", "file.saveAs", "file.autosave", "insert.editFooter", "insert.editHeader", "edit.undo", "edit.undoTo", "edit.redo", "edit.repeat"];
 
 /// The grade of engine command `id`; `None` for one in no table (refused until it is added, and
 /// `every_command_is_classified` fails).
@@ -652,6 +653,20 @@ mod tests {
             }
         }
         assert!(leaks.is_empty(), "add these to READ_ONLY_REFUSED: {leaks:#?}");
+    }
+
+    /// Undo and redo are not `mutates` but rewrite the document from the history, so a document
+    /// that has one (the fuzz test starts empty) must still refuse them.
+    #[test]
+    fn read_only_refuses_undo_with_history() {
+        let mut s = Session::new(crate::sample::sample_document());
+        s.run("document.setText", &json!({"text": "Seed"})).unwrap();
+        s.set_host_policy(HostPolicy::default().with_view(true, true, false));
+        let doc = s.doc.clone();
+        for id in ["edit.undo", "edit.redo", "edit.undoTo", "edit.repeat"] {
+            assert!(matches!(s.run(id, &json!({"index": 0})), Err(CmdError::Disabled(_))), "{id}");
+        }
+        assert_eq!(s.doc, doc);
     }
 
     /// Reading goes on: caret movement, selection, copy, find and zoom run.

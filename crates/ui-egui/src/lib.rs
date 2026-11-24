@@ -4567,6 +4567,35 @@ mod tests {
         assert!(!a.canvas.focused);
     }
 
+    /// View-only: the control channel's `ui.key` and `ui.text` become the same events as real input,
+    /// so they meet the same refusal and leave the document, dirty flag and undo stack alone.
+    #[test]
+    fn view_only_control_input_cannot_edit() {
+        let ctx = egui::Context::default();
+        let mut a = app();
+        a.run("document.setText", json!({"text": "Seed"})).unwrap();
+        a.session.set_host_policy(view_only());
+        for _ in 0..4 {
+            control_frame(&mut a, &ctx, true);
+        }
+        let (doc, dirty, depth) = (a.session.doc.clone(), a.session.dirty, a.session.undo_depth());
+        for (method, params) in [
+            ("ui.key", json!({"key": "Backspace"})),
+            ("ui.key", json!({"key": "Enter"})),
+            ("ui.key", json!({"key": "b", "cmd": true})),
+            ("ui.key", json!({"key": "z", "cmd": true})),
+            ("ui.text", json!({"text": "Refused"})),
+        ] {
+            control_input(&mut a, &ctx, method, params);
+            for _ in 0..3 {
+                control_frame(&mut a, &ctx, true);
+            }
+        }
+        assert_eq!(a.session.doc, doc);
+        assert!(a.session.dirty == dirty && a.session.undo_depth() == depth, "history and dirty flag stay as they were");
+        assert!(a.synthetic.is_empty());
+    }
+
     /// The control channel's `ui.wheel` scrolls the canvas like a mouse wheel over it.
     #[test]
     fn control_wheel_scrolls_the_canvas() {

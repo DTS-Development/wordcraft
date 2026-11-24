@@ -34,6 +34,7 @@
 //! - `wordcraft:bytes` (to the parent): `{ id, purpose, name, bytes }` (a transferred `ArrayBuffer`).
 //!   For `"save"` the document counts as saved, as with File › Save (no `wordcraft:save` goes out);
 //!   `"check"` and `"preview"` change nothing in the app.
+//! - `wordcraft:open` also takes `readOnly` (no edits, no dirty or save events, default false), `chrome` (false hides the ribbon, status bar and rulers, default true) and `zoomControls` (a floating zoom control while chrome is hidden, default false). They apply to that document only; a failed open restores the previous values. A save or table export of a read-only document fails with reason `read-only`.
 //! - `wordcraft:bytes-failed` (to the parent): `{ id, purpose, reason }`; `reason` is `not-ready`
 //!   (no document from the parent is open yet, or another is still opening), `bad-request`, or the
 //!   error text of the failed save.
