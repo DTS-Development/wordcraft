@@ -1,7 +1,7 @@
 //! The `postMessage` bridge to a same-origin parent page (`?host=parent`), for pages that embed
 //! WordCraft in an `<iframe>`. Messages are plain objects with a `type`:
 //!
-//! - `wordcraft:ready` (to the parent): `{ version }`, the app is listening; send a file now.
+//! - `wordcraft:ready` (to the parent): `{ version, openOptions }`, openOptions the open options this build understands, the app is listening; send a file now.
 //! - `wordcraft:open` (from the parent): `{ name, bytes, policy? }`, bytes an `ArrayBuffer` or
 //!   `Uint8Array`. It opens like a document picked with File › Open or dropped on the window.
 //!   `policy: { overrides: { "<command id>": true | false } }` switches commands for this document
@@ -34,6 +34,7 @@
 //! - `wordcraft:bytes` (to the parent): `{ id, purpose, name, bytes }` (a transferred `ArrayBuffer`).
 //!   For `"save"` the document counts as saved, as with File › Save (no `wordcraft:save` goes out);
 //!   `"check"` and `"preview"` change nothing in the app.
+//! - `wordcraft:open` also takes `readOnly` (no edits, no dirty or save events, default false), `chrome` (false hides the ribbon, status bar and rulers, default true) and `zoomControls` (a floating zoom control while chrome is hidden, default false). They apply to that document only; a failed open restores the previous values. A save or table export of a read-only document fails with reason `read-only`.
 //! - `wordcraft:bytes-failed` (to the parent): `{ id, purpose, reason }`; `reason` is `not-ready`
 //!   (no document from the parent is open yet, or another is still opening), `bad-request`, or the
 //!   error text of the failed save.
@@ -62,6 +63,13 @@ use wordcraft_engine::host_policy::HostPolicy;
 use wordcraft_ui_egui::host_goto::{self, Failure, Goto, Scope};
 use wordcraft_ui_egui::host_table::{self, MAX_CELL_CHARS, MAX_COLS, MAX_ROWS};
 use wordcraft_ui_egui::{HostPolicySlot, Inbox, Services, WordApp, queue_host_file};
+
+/// The open options this app understands, sent with `ready` so the parent can tell an older
+/// build (which would open a `readOnly` document editable) from this one.
+const OPEN_OPTIONS: [&str; 3] = ["readOnly", "chrome", "zoomControls"];
+
+/// The reason (`bytes-failed`) and error (`table-failed`) for a request a view-only document refuses.
+const READ_ONLY: &str = "read-only";
 
 /// The longest user name taken from `?author=`.
 const MAX_AUTHOR_CHARS: usize = 200;
@@ -211,7 +219,8 @@ impl Bridge {
     }
 
     pub fn post_ready(&self) {
-        self.send(&[("type", "wordcraft:ready".into()), ("version", env!("CARGO_PKG_VERSION").into())]);
+        let open_options: js_sys::Array = OPEN_OPTIONS.iter().map(|f| JsValue::from_str(f)).collect();
+        self.send(&[("type", "wordcraft:ready".into()), ("version", env!("CARGO_PKG_VERSION").into()), ("openOptions", open_options.into())]);
     }
 
     pub fn post_failed(&self, error: &str) {
@@ -221,6 +230,8 @@ impl Bridge {
     /// Before each pass: tables from the parent go in at the caret and the parent hears how each went.
     pub fn deliver_tables(&self, app: &mut WordApp) {
         for TableRequest { id, rows } in std::mem::take(&mut *self.tables.borrow_mut()) {
+            // A view-only document takes no table.
+            let rows = if app.read_only() { Err(READ_ONLY.to_string()) } else { rows };
             match rows.and_then(|rows| host_table::insert_table(app, &rows)) {
                 Ok(()) => self.send(&[("type", "wordcraft:table-inserted".into()), ("id", id.as_str().into())]),
                 Err(error) => self.send(&[("type", "wordcraft:table-failed".into()), ("id", id.as_str().into()), ("error", error.as_str().into())]),
@@ -262,6 +273,11 @@ impl Bridge {
                 continue;
             }
             let is_save = purpose == Purpose::Save;
+            // Nothing is saved from a view-only document: `check` and `preview` only read it.
+            if is_save && app.read_only() {
+                self.bytes_failed(&id, &purpose_text, READ_ONLY);
+                continue;
+            }
             let file = if is_save {
                 self.capturing.set(true);
                 let saved = app.run("file.save", serde_json::json!({}));
@@ -379,11 +395,7 @@ impl Bridge {
         });
         let options = web_sys::AddEventListenerOptions::new();
         options.set_capture(true);
-        if self
-            .window
-            .add_event_listener_with_callback_and_add_event_listener_options("keydown", on_key.as_ref().unchecked_ref(), &options)
-            .is_ok()
-        {
+        if self.window.add_event_listener_with_callback_and_add_event_listener_options("keydown", on_key.as_ref().unchecked_ref(), &options).is_ok() {
             on_key.forget();
         }
     }
@@ -489,14 +501,18 @@ fn message(fields: &[(&str, JsValue)]) -> Option<js_sys::Object> {
 /// value that is not a boolean is skipped, an id that is no command does nothing.
 fn policy(data: &JsValue) -> HostPolicy {
     let get = |from: &JsValue, key: &str| js_sys::Reflect::get(from, &JsValue::from_str(key)).ok();
+    // View options are per document and booleans only: anything else, or nothing, is the default
+    // (editable, chrome shown, no zoom control).
+    let flag = |key: &str, default: bool| get(data, key).and_then(|v| v.as_bool()).unwrap_or(default);
+    let view = |p: HostPolicy| p.with_view(flag("readOnly", false), flag("chrome", true), flag("zoomControls", false));
     let Some(overrides) = get(data, "policy").and_then(|p| get(&p, "overrides")).filter(|o| o.is_object() && !js_sys::Array::is_array(o)) else {
-        return HostPolicy::default();
+        return view(HostPolicy::default());
     };
     let entries = js_sys::Object::entries(&js_sys::Object::from(overrides));
-    HostPolicy::from_entries(entries.iter().filter_map(|e| {
+    view(HostPolicy::from_entries(entries.iter().filter_map(|e| {
         let pair = js_sys::Array::from(&e);
         Some((pair.get(0).as_string()?, pair.get(1).as_bool()))
-    }))
+    })))
 }
 
 fn string(data: &JsValue, key: &str) -> Option<String> {

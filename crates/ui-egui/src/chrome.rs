@@ -622,6 +622,53 @@ fn small_icon(ui: &mut Ui, icon: &str, tip: &str) -> bool {
     resp.on_hover_text(tip).clicked()
 }
 
+/// `chrome: false` with `zoomControls`: the status bar is gone, so a small zoom control (minus,
+/// the percentage, plus) floats over the page's bottom right corner. It runs the same view
+/// commands as the status bar's, which a view-only document allows.
+pub fn zoom_overlay(app: &mut WordApp, ctx: &egui::Context) {
+    if !app.chrome_hidden() || !app.session.host_policy().zoom_controls() || app.ui.backstage || !app.has_document() {
+        return;
+    }
+    let t = Tokens::get(ctx);
+    let reading = app.session.view.read_mode;
+    let z = (if reading { app.session.view.read_zoom } else { app.canvas.scale / crate::canvas::PX_PER_PT } * 100.0).round();
+    // Clear of the page's own scroll bars.
+    egui::Area::new(egui::Id::new("wc_zoom_overlay")).anchor(Align2::RIGHT_BOTTOM, vec2(-24.0, -20.0)).order(egui::Order::Foreground).show(
+        ctx,
+        |ui| {
+            egui::Frame::NONE.fill(t.panel).stroke(Stroke::new(1.0, t.border)).corner_radius(6.0).inner_margin(egui::Margin::symmetric(6, 3)).show(
+                ui,
+                |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing = vec2(4.0, 0.0);
+                        if small_icon(ui, "minus", tl!("Zoom Out")) {
+                            let _ = if reading {
+                                app.run("view.readTextSize", json!({"value": (z - 10.0).max(75.0)}))
+                            } else {
+                                app.run("view.zoomOut", json!({}))
+                            };
+                        }
+                        let font = TypeRung::Caption.regular();
+                        let track = TypeRung::Caption.tracking();
+                        let label = format!("{z}%");
+                        // A fixed width for three digits, so the buttons don't move as the percentage changes.
+                        let slot = text_width(ui.painter(), "000%", &font, track, t.text_dim) + 4.0;
+                        let (r, _) = ui.allocate_exact_size(vec2(slot, TypeRung::Caption.line_height()), Sense::hover());
+                        paint_text(ui.painter(), pos2(r.max.x - 1.0, r.min.y), Align2::RIGHT_TOP, &label, &font, track, t.text_dim);
+                        if small_icon(ui, "plus", tl!("Zoom In")) {
+                            let _ = if reading {
+                                app.run("view.readTextSize", json!({"value": (z + 10.0).min(150.0)}))
+                            } else {
+                                app.run("view.zoomIn", json!({}))
+                            };
+                        }
+                    });
+                },
+            );
+        },
+    );
+}
+
 impl WordApp {
     /// Word count, recomputed only when the document changes.
     pub fn cached_word_count(&mut self) -> usize {

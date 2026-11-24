@@ -238,6 +238,10 @@ pub fn canvas_events(app: &mut WordApp, ctx: &egui::Context) {
         }
         return;
     }
+    if app.read_only() {
+        read_only_events(app, events);
+        return;
+    }
     let alt_codes = alt_codes_supported(ctx);
     // `DeleteSurrounding` and the text replacing what it erased arrive in the same frame.
     app.canvas.ime_join_text = None;
@@ -407,6 +411,29 @@ pub fn canvas_events(app: &mut WordApp, ctx: &egui::Context) {
                     }
                     continue;
                 }
+                if leave_full_screen(app, key, modifiers, true) {
+                    continue;
+                }
+                app.canvas.swallow_text = dispatch(app, key, modifiers) && modifiers.alt;
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Events for a view-only document: what would type, paste, cut or compose text is dropped (no
+/// preedit is kept, so composing text never shows), Copy copies, and keys go to the shortcut table,
+/// whose commands the engine refuses when they edit. The keys that read (caret, selection,
+/// find, zoom, page turns) keep working. The equation, ink, table pen and text box handlers
+/// are not run: they act on an edit in progress that a view-only document never has.
+fn read_only_events(app: &mut WordApp, events: Vec<egui::Event>) {
+    app.canvas.ime_preedit.clear();
+    for e in events {
+        match e {
+            egui::Event::Copy => {
+                let _ = app.run("edit.copy", json!({}));
+            }
+            egui::Event::Key { key, pressed: true, modifiers, .. } if !is_context_menu_key(key, modifiers) => {
                 if leave_full_screen(app, key, modifiers, true) {
                     continue;
                 }

@@ -1298,6 +1298,8 @@ impl Session {
         let Some(spec) = reg.get(id) else { return Err(CmdError::Unknown(id.to_string())) };
         // The PPM host lock: commands outside its allowlist never start, whoever asked.
         self.host_gate(id, params)?;
+        // View-only (`readOnly`): nothing edits or saves, whatever the policy switched on.
+        self.read_only_check(id, spec.mutates).map_err(CmdError::Disabled)?;
         if let Some(why) = (spec.enabled)(self) {
             return Err(CmdError::Disabled(format!("{id}: {why}")));
         }

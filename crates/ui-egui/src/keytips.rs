@@ -638,7 +638,12 @@ use crate::keys;
 /// (not the canvas) has focus; the canvas lets Alt open keytips and `canvas_events` swallows
 /// typing while they show.
 pub fn suppressed(app: &WordApp, ctx: &egui::Context) -> bool {
-    !app.ui.keytips_enabled || app.ui.backstage || app.dialog.is_some() || (ctx.egui_wants_keyboard_input() && !app.canvas.focused)
+    // With the ribbon hidden there is nothing for the badges to point at.
+    !app.ui.keytips_enabled
+        || app.chrome_hidden()
+        || app.ui.backstage
+        || app.dialog.is_some()
+        || (ctx.egui_wants_keyboard_input() && !app.canvas.focused)
 }
 
 /// Native backends report Alt through both key and modifier events, in either order. Track

@@ -964,7 +964,8 @@ pub fn show(app: &mut WordApp, ui: &mut Ui) {
     // View › Switch Modes: dark paper, inverted document colours.
     let dark_page = app.session.view.dark_mode;
     let dark_paper = wordcraft_render::DARK_PAPER;
-    let show_ruler = app.session.view.ruler && app.session.view.mode == wordcraft_layout::ViewMode::Print && !app.session.view.read_mode;
+    let show_ruler =
+        app.session.view.ruler && app.session.view.mode == wordcraft_layout::ViewMode::Print && !app.session.view.read_mode && !app.chrome_hidden();
     let (hruler, vruler, area) = if show_ruler {
         let h = Rect::from_min_max(pos2(full.min.x + RULER, full.min.y), pos2(full.max.x, full.min.y + RULER));
         let v = Rect::from_min_max(pos2(full.min.x, full.min.y + RULER), pos2(full.min.x + RULER, full.max.y));
@@ -1486,11 +1487,11 @@ pub fn show(app: &mut WordApp, ui: &mut Ui) {
                 // The caret glides and fades like Word's (`caret_glide`).
                 let on = ((since / 530.0) as u64).is_multiple_of(2);
                 let look = crate::caret_glide::look(app, ui, content_origin, &geo, [pos2(x, y0), pos2(x, y1)], focused, since, on);
-                if look.opacity > 0.0 && focused {
+                if look.opacity > 0.0 && focused && !app.read_only() {
                     let caret_color = caret_color_at(app, &layout, pi, ex + slot.x, base - slot.y + (slot.d - slot.a) / 2.0, view, dim_body);
                     painter.line_segment(look.bar, Stroke::new(1.5, caret_color.gamma_multiply(look.opacity)));
                 }
-                if focused {
+                if focused && !app.read_only() {
                     ui.ctx().request_repaint_after(std::time::Duration::from_millis(530 - (since as u64 % 530)));
                     let cr = Rect::from_min_max(pos2(x, y0), pos2(x + 1.0, y1));
                     ui.ctx().output_mut(|o| {
@@ -1544,7 +1545,8 @@ pub fn show(app: &mut WordApp, ui: &mut Ui) {
             // The caret contrasts with what lies under it, like Word's inverted caret (#299), worked out
             // once for the bar and the composition, at the caret's drawn place (past the composition),
             // and only when something is drawn in it.
-            let shown = app.session.sel.is_collapsed() && focused;
+            // A view-only page has no caret to blink (the selection still shows).
+            let shown = app.session.sel.is_collapsed() && focused && !app.read_only();
             let caret_color = (shown || preedit_w > 0.0).then(|| {
                 let end = if c.width > 0.0 { 0.0 } else { preedit_w / scale };
                 caret_color_at(app, &layout, c.page, c.x + end + c.width / 2.0, c.top + c.height / 2.0, view, dim_body)
@@ -1560,12 +1562,13 @@ pub fn show(app: &mut WordApp, ui: &mut Ui) {
             if shown && look.opacity > 0.0 {
                 painter.line_segment(look.bar, Stroke::new(1.5, caret_color.unwrap_or(Color32::BLACK).gamma_multiply(look.opacity)));
             }
-            if focused {
+            let typing = focused && !app.read_only();
+            if typing {
                 ui.ctx().request_repaint_after(std::time::Duration::from_millis(530 - (since as u64 % 530)));
             }
             // IME candidate window placement.
             let cr = Rect::from_min_max(pos2(x, y0), pos2(x + 1.0, y1));
-            if focused {
+            if typing {
                 ui.ctx().output_mut(|o| {
                     o.ime = Some(egui::output::IMEOutput {
                         rect: cr,
@@ -2181,7 +2184,8 @@ fn active_balloon(app: &mut WordApp, ui: &mut Ui, painter: &egui::Painter, id: u
 /// Select a comment's balloon (its text gets the keyboard), writing back any edit in the one
 /// selected before.
 pub fn select_balloon(app: &mut WordApp, id: u32) {
-    if app.canvas.balloon == Some(id) {
+    // View-only: a balloon is read, never opened for typing (replies, resolve and delete stay out of reach).
+    if app.canvas.balloon == Some(id) || app.read_only() {
         return;
     }
     deselect_balloon(app);
@@ -3112,7 +3116,9 @@ fn equation_menu(app: &mut WordApp, ui: &mut Ui) {
 }
 
 fn context_menu(app: &mut WordApp, ui: &mut Ui) {
-    if app.session.math.is_some() {
+    // View-only: the menu is Copy and Select All, nothing that edits is drawn.
+    let view_only = app.read_only();
+    if app.session.math.is_some() && !view_only {
         return equation_menu(app, ui);
     }
     ui.set_min_width(220.0);
@@ -3128,6 +3134,11 @@ fn context_menu(app: &mut WordApp, ui: &mut Ui) {
             ui.close();
         }
     };
+    if view_only {
+        item(ui, app, "Copy", "edit.copy", json!({}));
+        item(ui, app, "Select All", "select.all", json!({}));
+        return;
+    }
     if let Some(issue) = app.canvas.context_issue.clone() {
         let sugg: Vec<String> = issue
             .get("suggestions")

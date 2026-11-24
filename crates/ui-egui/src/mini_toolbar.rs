@@ -108,6 +108,10 @@ pub fn visible(app: &WordApp) -> bool {
     if app.session.view.read_mode {
         return false;
     }
+    // A view-only document has nothing to format.
+    if app.read_only() {
+        return false;
+    }
     // Never over a modal dialog or the Backstage.
     if app.dialog.is_some() || app.colors.is_some() || app.ui.backstage {
         return false;

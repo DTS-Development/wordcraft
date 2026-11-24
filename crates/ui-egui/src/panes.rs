@@ -11,6 +11,18 @@ use wordcraft_doc::{Pos, StoryRef};
 use crate::WordApp;
 use crate::theme::{Tokens, regular, semibold};
 
+/// The Navigation pane (find, headings, pages) when it is open. `chrome: false` shows only this
+/// pane, so Ctrl+F still has somewhere to search.
+pub fn nav_pane(app: &mut WordApp, ui: &mut Ui, t: &Tokens) {
+    if app.session.view.nav_pane {
+        egui::Panel::left("nav_pane")
+            .default_size(260.0)
+            .resizable(true)
+            .frame(egui::Frame::NONE.fill(t.panel).inner_margin(10).stroke(Stroke::new(1.0, t.border)))
+            .show(ui, |ui| nav(app, ui));
+    }
+}
+
 pub fn show(app: &mut WordApp, ui: &mut Ui) {
     let t = Tokens::get(ui.ctx());
     // SmartArt Design › Text Pane, while a SmartArt graphic WordCraft can edit is selected.
@@ -27,13 +39,7 @@ pub fn show(app: &mut WordApp, ui: &mut Ui) {
                 crate::dialogs_smart_art::text_pane(app, ui);
             });
     }
-    if app.session.view.nav_pane {
-        egui::Panel::left("nav_pane")
-            .default_size(260.0)
-            .resizable(true)
-            .frame(egui::Frame::NONE.fill(t.panel).inner_margin(10).stroke(Stroke::new(1.0, t.border)))
-            .show(ui, |ui| nav(app, ui));
-    }
+    nav_pane(app, ui, &t);
     if app.session.view.clipboard_pane {
         egui::Panel::left("clipboard_pane")
             .default_size(250.0)
