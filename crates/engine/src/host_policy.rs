@@ -168,6 +168,9 @@ pub struct HostPolicy {
     hide_chrome: bool,
     /// `zoomControls`: with the chrome hidden, a small zoom control stays over the page.
     zoom_controls: bool,
+    /// `keepView`: this open replaces the document in place, so the page the user was looking at
+    /// (scroll, caret, zoom) stays. Not a command switch.
+    keep_view: bool,
 }
 
 /// Most overrides one open message may carry (the contract allows 4000); the first ones that
@@ -199,6 +202,17 @@ impl HostPolicy {
         self.hide_chrome = !chrome;
         self.zoom_controls = zoom_controls;
         self
+    }
+
+    /// This policy for an open that keeps the view of the document it replaces.
+    pub fn with_keep_view(mut self, keep: bool) -> Self {
+        self.keep_view = keep;
+        self
+    }
+
+    /// Whether the open keeps the replaced document's view (`keepView`).
+    pub fn keep_view(&self) -> bool {
+        self.keep_view
     }
 
     /// Whether the document is open view-only.

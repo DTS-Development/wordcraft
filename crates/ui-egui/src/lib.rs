@@ -139,6 +139,9 @@ pub struct Services {
     /// Web: told whether the document has unsaved changes after each pass, for the browser's
     /// leave-page guard (`beforeunload` runs between frames and can't ask the app).
     pub on_dirty: Option<Box<dyn Fn(bool)>>,
+    /// Web: told the document's revision after each pass in which the document has unsaved changes
+    /// (never for a view-only one). `dirty` only flips, so this is how the parent sees that editing goes on.
+    pub on_edited: Option<Box<dyn Fn(u64)>>,
     /// Web: hand PDF bytes to the browser's print dialog (no download or intermediate file).
     /// Desktop uses `print_native` instead. An error means nothing was opened.
     pub print: Option<Box<dyn Fn(&[u8]) -> Result<(), String>>>,
@@ -195,6 +198,38 @@ enum PromptSave {
 }
 
 /// Web: a save the browser's picker hasn't finished ([`async_saves`]).
+/// What the user was looking at in the document a `keepView` open replaces: where it was
+/// scrolled to, the caret, and the zoom. The new document gets them back as far as it has the
+/// places (a caret past its end goes to the end; a page that isn't there is as far as it goes).
+struct KeptView {
+    scroll: egui::Vec2,
+    sel: wordcraft_engine::Selection,
+    zoom: f32,
+    fit: String,
+    mode: wordcraft_layout::ViewMode,
+    multi_page: bool,
+    single_column: bool,
+}
+
+impl KeptView {
+    fn capture(app: &WordApp) -> Self {
+        let v = &app.session.view;
+        KeptView { scroll: app.canvas.scroll_offset, sel: app.session.sel.clone(), zoom: v.zoom, fit: v.fit.clone(), mode: v.mode, multi_page: v.multi_page, single_column: v.single_column }
+    }
+
+    fn restore(self, app: &mut WordApp) {
+        let v = &mut app.session.view;
+        v.zoom = self.zoom;
+        v.fit = self.fit;
+        v.mode = self.mode;
+        v.multi_page = self.multi_page;
+        v.single_column = self.single_column;
+        app.session.sel = self.sel;
+        app.session.clamp_selection();
+        app.canvas.request_scroll(self.scroll);
+    }
+}
+
 struct SaveInFlight {
     ticket: u64,
     /// The file name it saves as.
@@ -646,6 +681,8 @@ pub struct WordApp {
     host_view_next: Option<(bool, bool, bool)>,
     /// Host mode: a document from the parent has opened (the blank start document doesn't count).
     host_opened: bool,
+    /// The open now running was sent with `keepView` (see [`KeptView`]).
+    host_view_next_keep: bool,
     /// The file dialog the host is showing, and what its answer is for ([`file_dialogs`]).
     file_dialog: Option<file_dialogs::PendingDialog>,
     /// The built-in file browser, when it is open, and the folder it showed last (#576).
@@ -752,6 +789,7 @@ impl WordApp {
             host_policy_undo: None,
             host_view_next: None,
             host_opened: false,
+            host_view_next_keep: false,
             change_picture_target: None,
             recipient_list_pending: false,
             font_generation: wordcraft_fonts::FontDb::global().generation(),
@@ -2237,6 +2275,12 @@ impl WordApp {
             // A view-only document is never reported as changed, even by a draft in a pane.
             f(!self.read_only() && (self.session.dirty || panes::has_comment_drafts(self)));
         }
+        if let Some(f) = &self.services.on_edited
+            && !self.read_only()
+            && self.session.dirty
+        {
+            f(self.session.rev());
+        }
     }
 
     /// Whether the document's file is one the user saved to in this session.
@@ -2506,6 +2550,11 @@ impl WordApp {
         }
     }
 
+    /// Whether the open now running asked to keep the view of the document it replaces.
+    fn host_policy_keeps_view(&self) -> bool {
+        self.host_view_next_keep
+    }
+
     /// Documents the parent page sent: each opens as a document, like File › Open (a dirty
     /// document asks Save / Don't Save / Cancel first). The name's extension only picks the file
     /// format, never another kind of import. One at a time: while a document waits for the Save
@@ -2531,16 +2580,22 @@ impl WordApp {
             let next = policy.unwrap_or_default();
             // The open's policy goes on now; its view options wait for the open to succeed.
             self.host_view_next = Some((next.read_only(), !next.chrome_hidden(), next.zoom_controls()));
+            self.host_view_next_keep = next.keep_view();
             self.session.set_host_policy(next.with_view(before.read_only(), !before.chrome_hidden(), before.zoom_controls()));
             self.host_policy_undo = Some(before);
             // The user's own Open is blocked in host mode; the parent's document is the one open
             // that passes the lock (it stays armed while a Save Changes prompt waits).
             self.session.arm_host_open(&name);
+            // `keepView`: the document being replaced hands its view to the one that comes in.
+            let kept = self.host_policy_keeps_view().then(|| KeptView::capture(self));
             let r = self.run("file.open", json!({"path": name, "data": wordcraft_engine::cmd::insert::base64_encode(&bytes)}));
             if !r.as_ref().is_ok_and(|v| v.get("pending").is_some()) {
                 self.session.disarm_host_open();
                 if r.is_ok() {
                     self.host_policy_undo = None;
+                    if let Some(kept) = kept {
+                        kept.restore(self);
+                    }
                 } else {
                     self.drop_host_open();
                 }
@@ -7742,6 +7797,48 @@ mod tests {
 
     fn view_only() -> wordcraft_engine::host_policy::HostPolicy {
         wordcraft_engine::host_policy::HostPolicy::default().with_view(true, false, true)
+    }
+
+    /// `keepView`: the replacing document gets the zoom, caret and scroll of the one it replaces;
+    /// an open without it starts from the top as before.
+    #[test]
+    fn keep_view_open_restores_zoom_caret_and_scroll() {
+        use wordcraft_engine::host_policy::HostPolicy;
+        let mut a = locked_app();
+        let (host, slot) = (Inbox::default(), HostPolicySlot::default());
+        a.services.host_inbox = Some(host.clone());
+        a.services.host_policy = Some(slot.clone());
+        queue_host_file(&host, &slot, ("a.txt".into(), b"first paragraph here".to_vec()), HostPolicy::default());
+        a.drain_host_inbox();
+        a.session.view.zoom = 1.5;
+        let end = a.session.doc.end_of(wordcraft_doc::StoryRef::Body);
+        a.session.sel = wordcraft_engine::Selection::caret(end.clone());
+        a.canvas.scroll_offset = egui::vec2(0.0, 240.0);
+        queue_host_file(&host, &slot, ("a.txt".into(), b"first paragraph here, longer".to_vec()), HostPolicy::default().with_keep_view(true));
+        a.drain_host_inbox();
+        assert!(body(&a).contains("longer"));
+        assert_eq!(a.session.view.zoom, 1.5);
+        assert_eq!(a.session.sel.focus.off, end.off.min(a.session.doc.end_of(wordcraft_doc::StoryRef::Body).off));
+        assert_eq!(a.canvas.scroll_request, Some(egui::vec2(0.0, 240.0)));
+        // Without keepView the next open does not ask for a scroll.
+        a.canvas.scroll_request = None;
+        queue_host_file(&host, &slot, ("b.txt".into(), b"other".to_vec()), HostPolicy::default());
+        a.drain_host_inbox();
+        assert_eq!(a.canvas.scroll_request, None);
+    }
+
+    /// `on_edited` hears the revision while the document has unsaved changes, never for a view-only one.
+    #[test]
+    fn edited_reports_the_revision_of_a_changed_document() {
+        let mut a = app();
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let log = seen.clone();
+        a.services.on_edited = Some(Box::new(move |r| log.borrow_mut().push(r)));
+        a.report_dirty();
+        assert!(seen.borrow().is_empty(), "nothing changed yet");
+        a.run("text.insert", json!({"text": "x"})).unwrap();
+        a.report_dirty();
+        assert_eq!(seen.borrow().last().copied(), Some(a.session.rev()));
     }
 
     /// View options belong to one document: the next open without them is editable and shows the
