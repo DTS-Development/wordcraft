@@ -12,6 +12,7 @@
 //!   file WordCraft would otherwise download: Save and Save As (a .docx document) and Export
 //!   (such as PDF). The parent stores it and reports failures itself.
 //! - `wordcraft:dirty` (to the parent): `{ dirty }` whenever unsaved changes appear or go away.
+//! - `wordcraft:edited` (to the parent): `{ rev }` after a pass in which the document has unsaved changes and its revision moved; only for a document opened with `live: true`, never for a view-only one. `dirty` only flips, so this is how the parent sees that editing goes on.
 //! - `wordcraft:failed` (to the parent): `{ error }` when the app couldn't start.
 //! - `wordcraft:insert-table` (from the parent): `{ id, rows }`, rows an array of arrays of
 //!   strings. It inserts a table with those cell texts at the caret, as one undo step.
@@ -34,6 +35,7 @@
 //! - `wordcraft:bytes` (to the parent): `{ id, purpose, name, bytes }` (a transferred `ArrayBuffer`).
 //!   For `"save"` the document counts as saved, as with File › Save (no `wordcraft:save` goes out);
 //!   `"check"` and `"preview"` change nothing in the app.
+//! - `wordcraft:open` also takes `live` (send `edited`, default false) and `keepView` (the document replaces the open one in place: its scroll, caret and zoom are put back on the new one as far as it has the places, default false).
 //! - `wordcraft:open` also takes `readOnly` (no edits, no dirty or save events, default false), `chrome` (false hides the ribbon, status bar and rulers, default true) and `zoomControls` (a floating zoom control while chrome is hidden, default false). They apply to that document only; a failed open restores the previous values. A save or table export of a read-only document fails with reason `read-only`.
 //! - `wordcraft:bytes-failed` (to the parent): `{ id, purpose, reason }`; `reason` is `not-ready`
 //!   (no document from the parent is open yet, or another is still opening), `bad-request`, or the
@@ -66,7 +68,7 @@ use wordcraft_ui_egui::{HostPolicySlot, Inbox, Services, WordApp, queue_host_fil
 
 /// The open options this app understands, sent with `ready` so the parent can tell an older
 /// build (which would open a `readOnly` document editable) from this one.
-const OPEN_OPTIONS: [&str; 3] = ["readOnly", "chrome", "zoomControls"];
+const OPEN_OPTIONS: [&str; 5] = ["readOnly", "chrome", "zoomControls", "live", "keepView"];
 
 /// The reason (`bytes-failed`) and error (`table-failed`) for a request a view-only document refuses.
 const READ_ONLY: &str = "read-only";
@@ -139,6 +141,10 @@ pub struct Bridge {
     origin: String,
     /// The unsaved-changes state last reported to the parent.
     reported: Rc<Cell<Option<bool>>>,
+    /// The last open message asked for `edited` events (`live`).
+    live: Rc<Cell<bool>>,
+    /// The revision last reported with `wordcraft:edited`.
+    edited: Rc<Cell<Option<u64>>>,
     /// Tables from the parent not yet inserted.
     tables: Rc<RefCell<Vec<TableRequest>>>,
     /// Places from the parent not yet shown.
@@ -171,6 +177,8 @@ impl Bridge {
             parent,
             origin,
             reported: Rc::default(),
+            live: Rc::default(),
+            edited: Rc::default(),
             tables: Rc::default(),
             gotos: Rc::default(),
             byte_requests: Rc::default(),
@@ -205,6 +213,9 @@ impl Bridge {
             }
             bridge.report_dirty(dirty);
         }));
+        // A document opened with `live` also tells the parent when its revision moves (`dirty` only flips).
+        let bridge = self.clone();
+        services.on_edited = Some(Box::new(move |rev| bridge.report_edited(rev)));
     }
 
     /// `?author=`: the host's name for the user signs new comments and tracked changes.
@@ -406,6 +417,12 @@ impl Bridge {
         }
     }
 
+    fn report_edited(&self, rev: u64) {
+        if self.live.get() && self.edited.get() != Some(rev) && self.send(&[("type", "wordcraft:edited".into()), ("rev", (rev as f64).into())]) {
+            self.edited.set(Some(rev));
+        }
+    }
+
     fn post_save(&self, path: &str, bytes: &[u8]) -> Result<(), String> {
         if self.capturing.get() {
             let name = std::path::Path::new(path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| path.to_string());
@@ -427,6 +444,8 @@ impl Bridge {
         let tables = self.tables.clone();
         let gotos = self.gotos.clone();
         let byte_requests = self.byte_requests.clone();
+        let live = self.live.clone();
+        let edited = self.edited.clone();
         let bridge = self.clone();
         let on_message = Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |event: web_sys::MessageEvent| {
             if event.origin() != origin || !event.source().is_some_and(|s| js_sys::Object::is(&s, &parent)) {
@@ -437,6 +456,9 @@ impl Bridge {
                 Some("wordcraft:open") => {
                     let name = string(&data, "name").filter(|n| !n.trim().is_empty()).unwrap_or_else(|| "Document.docx".to_string());
                     let Some(bytes) = bytes(&data) else { return };
+                    // Whether this document reports `edited` (a new document starts counting again).
+                    live.set(js_sys::Reflect::get(&data, &JsValue::from_str("live")).ok().and_then(|v| v.as_bool()).unwrap_or(false));
+                    edited.set(None);
                     // The policy goes in with the file (one per file, the queue is capped).
                     queue_host_file(&inbox, &policy_slot, (name, bytes), policy(&data));
                 }
@@ -504,7 +526,7 @@ fn policy(data: &JsValue) -> HostPolicy {
     // View options are per document and booleans only: anything else, or nothing, is the default
     // (editable, chrome shown, no zoom control).
     let flag = |key: &str, default: bool| get(data, key).and_then(|v| v.as_bool()).unwrap_or(default);
-    let view = |p: HostPolicy| p.with_view(flag("readOnly", false), flag("chrome", true), flag("zoomControls", false));
+    let view = |p: HostPolicy| p.with_view(flag("readOnly", false), flag("chrome", true), flag("zoomControls", false)).with_keep_view(flag("keepView", false));
     let Some(overrides) = get(data, "policy").and_then(|p| get(&p, "overrides")).filter(|o| o.is_object() && !js_sys::Array::is_array(o)) else {
         return view(HostPolicy::default());
     };

@@ -130,7 +130,7 @@ pub struct CanvasState {
     pub(crate) scroll_offset: egui::Vec2,
     scroll_max: egui::Vec2,
     /// Explicit page turn to apply on the next frame (reading navigation buttons/keys).
-    scroll_request: Option<egui::Vec2>,
+    pub(crate) scroll_request: Option<egui::Vec2>,
     /// The viewport (the content's visible rect on screen) at the end of last frame; the
     /// drag-select edge auto-scroll decides this frame's scroll from it (#688).
     pub(crate) viewport: Option<egui::Rect>,
@@ -182,6 +182,12 @@ pub struct CanvasState {
 }
 
 impl CanvasState {
+    /// Scrolls to `offset` on the next frame (clamped to the page), without following the caret.
+    pub(crate) fn request_scroll(&mut self, offset: egui::Vec2) {
+        self.scroll_request = Some(offset);
+        self.scroll_to_caret = false;
+    }
+
     /// Stop a text-selection drag when the pointer gesture becomes an object drag.
     pub(crate) fn cancel_text_drag(&mut self) {
         self.dragging = false;
