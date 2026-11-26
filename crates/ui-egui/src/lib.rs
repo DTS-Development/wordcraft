@@ -73,6 +73,7 @@ pub mod previews;
 pub mod print_page;
 pub mod printing;
 pub mod read_aloud;
+pub mod remote_cursors;
 pub mod ribbon;
 pub mod ribbon_fit;
 pub mod ruler_tabs;
@@ -142,6 +143,11 @@ pub struct Services {
     /// Web: told the document's revision after each pass in which the document has unsaved changes
     /// (never for a view-only one). `dirty` only flips, so this is how the parent sees that editing goes on.
     pub on_edited: Option<Box<dyn Fn(u64)>>,
+    /// Web, document opened with `cursors`: told where this editor's caret and selection are (the
+    /// `pos` of `collab-cursor`, [`remote_cursors::pos_json`]) when it changes, and `None` when the
+    /// place is cleared (a new document opens). Returns false when a send failed: the place is then
+    /// offered again on the next pass. Not told while an IME composition runs or the document is opening.
+    pub on_cursor: Option<Box<dyn Fn(Option<&serde_json::Value>) -> bool>>,
     /// Web: hand PDF bytes to the browser's print dialog (no download or intermediate file).
     /// Desktop uses `print_native` instead. An error means nothing was opened.
     pub print: Option<Box<dyn Fn(&[u8]) -> Result<(), String>>>,
@@ -683,6 +689,10 @@ pub struct WordApp {
     host_opened: bool,
     /// The open now running was sent with `keepView` (see [`KeptView`]).
     host_view_next_keep: bool,
+    /// Where the other people of a shared document are (the parent's `collab-cursors`); empty otherwise.
+    pub remote_cursors: Vec<remote_cursors::RemoteCursor>,
+    /// The selection last handed to [`Services::on_cursor`] (`None`: none, or cleared).
+    cursor_sent: Option<wordcraft_engine::Selection>,
     /// The file dialog the host is showing, and what its answer is for ([`file_dialogs`]).
     file_dialog: Option<file_dialogs::PendingDialog>,
     /// The built-in file browser, when it is open, and the folder it showed last (#576).
@@ -790,6 +800,8 @@ impl WordApp {
             host_view_next: None,
             host_opened: false,
             host_view_next_keep: false,
+            remote_cursors: Vec::new(),
+            cursor_sent: None,
             change_picture_target: None,
             recipient_list_pending: false,
             font_generation: wordcraft_fonts::FontDb::global().generation(),
@@ -2245,6 +2257,7 @@ impl WordApp {
         self.ensure_comment_fonts();
         self.install_ui_fonts(ctx, lang);
         self.report_dirty();
+        self.report_cursor();
     }
 
     /// Install the interface fonts when the language, the CJK fallback, or a caption fallback
@@ -2280,6 +2293,30 @@ impl WordApp {
             && self.session.dirty
         {
             f(self.session.rev());
+        }
+    }
+
+    /// Tell the host where the caret and selection are ([`Services::on_cursor`]), when that changed.
+    fn report_cursor(&mut self) {
+        let Some(f) = &self.services.on_cursor else { return };
+        // A place in the middle of a composition or of an opening document would be a stale one.
+        if !self.host_document_ready() || !self.canvas.ime_preedit.is_empty() {
+            return;
+        }
+        // Compared as it is: the JSON is built only for a place that changed.
+        if self.cursor_sent.as_ref() != Some(&self.session.sel) && f(Some(&remote_cursors::pos_json(&self.session.sel.anchor, &self.session.sel.focus))) {
+            self.cursor_sent = Some(self.session.sel.clone());
+        }
+    }
+
+    /// A new document from the host replaces this one: the place it had is cleared on the host, and
+    /// the others' places (they were in the old document) are dropped.
+    fn clear_cursor(&mut self) {
+        self.remote_cursors.clear();
+        if self.cursor_sent.take().is_some()
+            && let Some(f) = &self.services.on_cursor
+        {
+            f(None);
         }
     }
 
@@ -2450,6 +2487,7 @@ impl WordApp {
         self.frame_ms = now_ms() - t0;
         // Typing and formatting land here, after `logic` has reported.
         self.report_dirty();
+        self.report_cursor();
     }
 
     /// Carry View › Full Screen (`view.fullScreen`, F11) to the window, and follow the window
@@ -2574,6 +2612,7 @@ impl WordApp {
                 if files.is_empty() { None } else { Some(files.remove(0)) }
             };
             let Some((name, bytes)) = file else { return };
+            self.clear_cursor();
             // The policy arrives with the open message; a message without one means no switch changed.
             let policy = self.services.host_policy.as_ref().and_then(|slot| slot.lock().unwrap_or_else(|e| e.into_inner()).pop_front());
             let before = self.session.host_policy().clone();
@@ -7839,6 +7878,54 @@ mod tests {
         a.run("text.insert", json!({"text": "x"})).unwrap();
         a.report_dirty();
         assert_eq!(seen.borrow().last().copied(), Some(a.session.rev()));
+    }
+
+    /// `on_cursor` hears the caret and selection once, again only when they change, never while an
+    /// IME composition runs, and a new host document clears the place and the others' places.
+    #[test]
+    fn cursor_place_is_sent_once_per_change() {
+        let mut a = app();
+        a.host_opened = true;
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::<Option<serde_json::Value>>::new()));
+        let log = seen.clone();
+        a.services.on_cursor = Some(Box::new(move |p| {
+            log.borrow_mut().push(p.cloned());
+            true
+        }));
+        a.report_cursor();
+        a.report_cursor();
+        assert_eq!(seen.borrow().len(), 1, "the same place isn't sent twice");
+        let first = seen.borrow()[0].clone().unwrap();
+        assert_eq!(first["anchor"], first["head"], "a caret has anchor == head");
+        a.canvas.ime_preedit = "ㅎ".into();
+        a.run("text.insert", json!({"text": "x"})).unwrap();
+        a.report_cursor();
+        assert_eq!(seen.borrow().len(), 1, "nothing while composing");
+        a.canvas.ime_preedit.clear();
+        a.report_cursor();
+        assert_eq!(seen.borrow().len(), 2, "one place when the composition ends");
+        a.remote_cursors.push(remote_cursors::RemoteCursor {
+            conn: 1,
+            name: "A".into(),
+            color: [1, 2, 3],
+            view: false,
+            anchor: a.session.sel.anchor.clone(),
+            head: a.session.sel.focus.clone(),
+        });
+        a.clear_cursor();
+        assert!(a.remote_cursors.is_empty());
+        assert_eq!(seen.borrow().last(), Some(&None), "a clear is sent");
+        a.clear_cursor();
+        assert_eq!(seen.borrow().len(), 3, "and only once");
+    }
+
+    /// Without `on_cursor` (a document opened without `cursors`) nothing is sent or kept.
+    #[test]
+    fn no_cursor_hook_means_no_place() {
+        let mut a = app();
+        a.host_opened = true;
+        a.report_cursor();
+        assert!(a.cursor_sent.is_none());
     }
 
     /// View options belong to one document: the next open without them is editable and shows the

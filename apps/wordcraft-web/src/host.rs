@@ -35,6 +35,7 @@
 //! - `wordcraft:bytes` (to the parent): `{ id, purpose, name, bytes }` (a transferred `ArrayBuffer`).
 //!   For `"save"` the document counts as saved, as with File › Save (no `wordcraft:save` goes out);
 //!   `"check"` and `"preview"` change nothing in the app.
+//! - `wordcraft:collab-cursor` (to the parent), only for a document opened with `cursors: true`: `{ region: "doc", pos: { anchor, head } }` (the caret and selection as the engine's `Pos`, `{story, path, off}`; a caret has anchor == head) when they change, `{ region: null }` when a new document replaces the open one. Not sent while an IME composition runs. `wordcraft:collab-cursors` (from the parent): `{ cursors: [{ conn, user, name, color, role, region, pos? }] }`, the other people's places, drawn as a shaded selection and a caret with a name tag; only entries in the body are drawn (a place in a header, footer, note or text box is skipped).
 //! - `wordcraft:open` also takes `live` (send `edited`, default false) and `keepView` (the document replaces the open one in place: its scroll, caret and zoom are put back on the new one as far as it has the places, default false).
 //! - `wordcraft:open` also takes `readOnly` (no edits, no dirty or save events, default false), `chrome` (false hides the ribbon, status bar and rulers, default true) and `zoomControls` (a floating zoom control while chrome is hidden, default false). They apply to that document only; a failed open restores the previous values. A save or table export of a read-only document fails with reason `read-only`.
 //! - `wordcraft:bytes-failed` (to the parent): `{ id, purpose, reason }`; `reason` is `not-ready`
@@ -68,7 +69,7 @@ use wordcraft_ui_egui::{HostPolicySlot, Inbox, Services, WordApp, queue_host_fil
 
 /// The open options this app understands, sent with `ready` so the parent can tell an older
 /// build (which would open a `readOnly` document editable) from this one.
-const OPEN_OPTIONS: [&str; 5] = ["readOnly", "chrome", "zoomControls", "live", "keepView"];
+const OPEN_OPTIONS: [&str; 6] = ["readOnly", "chrome", "zoomControls", "live", "keepView", "cursors"];
 
 /// The reason (`bytes-failed`) and error (`table-failed`) for a request a view-only document refuses.
 const READ_ONLY: &str = "read-only";
@@ -145,6 +146,12 @@ pub struct Bridge {
     live: Rc<Cell<bool>>,
     /// The revision last reported with `wordcraft:edited`.
     edited: Rc<Cell<Option<u64>>>,
+    /// The last open message asked for places of people (`cursors`).
+    cursors: Rc<Cell<bool>>,
+    /// Whether a place (not a clear) was sent for the open document, so a clear is sent only after one.
+    placed: Rc<Cell<bool>>,
+    /// The latest `collab-cursors` message (or an empty list on open) not yet handed to the app.
+    cursors_in: Rc<RefCell<Option<serde_json::Value>>>,
     /// Tables from the parent not yet inserted.
     tables: Rc<RefCell<Vec<TableRequest>>>,
     /// Places from the parent not yet shown.
@@ -179,6 +186,9 @@ impl Bridge {
             reported: Rc::default(),
             live: Rc::default(),
             edited: Rc::default(),
+            cursors: Rc::default(),
+            placed: Rc::default(),
+            cursors_in: Rc::default(),
             tables: Rc::default(),
             gotos: Rc::default(),
             byte_requests: Rc::default(),
@@ -216,6 +226,9 @@ impl Bridge {
         // A document opened with `live` also tells the parent when its revision moves (`dirty` only flips).
         let bridge = self.clone();
         services.on_edited = Some(Box::new(move |rev| bridge.report_edited(rev)));
+        // A document opened with `cursors` also tells the parent where its caret and selection are.
+        let bridge = self.clone();
+        services.on_cursor = Some(Box::new(move |pos| bridge.report_cursor(pos)));
     }
 
     /// `?author=`: the host's name for the user signs new comments and tracked changes.
@@ -423,6 +436,32 @@ impl Bridge {
         }
     }
 
+    /// `collab-cursor`: the place of this editor's caret and selection (region `doc`), or a clear.
+    /// A document that wasn't opened with `cursors` sends nothing (true: nothing to retry).
+    fn report_cursor(&self, pos: Option<&serde_json::Value>) -> bool {
+        let fields: Vec<(&str, JsValue)> = match pos {
+            Some(_) if !self.cursors.get() => return true,
+            None if !self.placed.get() => return true,
+            Some(pos) => {
+                let Ok(pos) = js_sys::JSON::parse(&pos.to_string()) else { return true };
+                vec![("type", "wordcraft:collab-cursor".into()), ("region", "doc".into()), ("pos", pos)]
+            }
+            None => vec![("type", "wordcraft:collab-cursor".into()), ("region", JsValue::NULL)],
+        };
+        let sent = self.send(&fields);
+        if sent {
+            self.placed.set(pos.is_some());
+        }
+        sent
+    }
+
+    /// Before each pass: the latest places of the other people go to the app.
+    pub fn deliver_cursors(&self, app: &mut WordApp) {
+        if let Some(m) = self.cursors_in.borrow_mut().take() {
+            app.remote_cursors = wordcraft_ui_egui::remote_cursors::parse(&m);
+        }
+    }
+
     fn post_save(&self, path: &str, bytes: &[u8]) -> Result<(), String> {
         if self.capturing.get() {
             let name = std::path::Path::new(path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| path.to_string());
@@ -446,6 +485,8 @@ impl Bridge {
         let byte_requests = self.byte_requests.clone();
         let live = self.live.clone();
         let edited = self.edited.clone();
+        let cursors = self.cursors.clone();
+        let cursors_in = self.cursors_in.clone();
         let bridge = self.clone();
         let on_message = Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |event: web_sys::MessageEvent| {
             if event.origin() != origin || !event.source().is_some_and(|s| js_sys::Object::is(&s, &parent)) {
@@ -459,8 +500,20 @@ impl Bridge {
                     // Whether this document reports `edited` (a new document starts counting again).
                     live.set(js_sys::Reflect::get(&data, &JsValue::from_str("live")).ok().and_then(|v| v.as_bool()).unwrap_or(false));
                     edited.set(None);
+                    // Whether it shows places of people; the old document's list is dropped (an empty one replaces it).
+                    cursors.set(js_sys::Reflect::get(&data, &JsValue::from_str("cursors")).ok().and_then(|v| v.as_bool()).unwrap_or(false));
+                    *cursors_in.borrow_mut() = Some(serde_json::json!({ "cursors": [] }));
                     // The policy goes in with the file (one per file, the queue is capped).
                     queue_host_file(&inbox, &policy_slot, (name, bytes), policy(&data));
+                }
+                Some("wordcraft:collab-cursors") => {
+                    // Only a document opened with `cursors` listens; the latest list replaces one still waiting.
+                    if !cursors.get() {
+                        return;
+                    }
+                    // Plain JSON by the wire contract; anything else is dropped.
+                    let Some(m) = js_sys::JSON::stringify(&data).ok().and_then(|s| s.as_string()).and_then(|s| serde_json::from_str(&s).ok()) else { return };
+                    *cursors_in.borrow_mut() = Some(m);
                 }
                 Some("wordcraft:insert-table") => {
                     // Without a usable id there is nobody to answer.

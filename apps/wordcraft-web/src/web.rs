@@ -191,6 +191,7 @@ impl eframe::App for WebShell {
             bridge.deliver_tables(&mut self.app);
             bridge.deliver_gotos(&mut self.app);
             bridge.deliver_bytes(&mut self.app);
+            bridge.deliver_cursors(&mut self.app);
         }
         self.app.logic(ctx);
         // Store changed preferences straight away: a reload or closed tab runs no exit code (#2132).

@@ -1454,6 +1454,13 @@ pub fn show(app: &mut WordApp, ui: &mut Ui) {
         // document-first line may be scrolled offscreen; using it would pin the toolbar to an
         // old screen position unrelated to the visible selection.
         app.canvas.mini_anchor = crate::mini_toolbar::visible_anchor(screen_rects, visible_clip);
+        // The other people of a shared document: their selections and carets (draw-only).
+        if !app.remote_cursors.is_empty() {
+            let hint = app.session.page_hint;
+            crate::remote_cursors::paint(&painter, visible_clip, &app.remote_cursors, &app.session.doc, &layout, hint, &rects, |pi, pr| {
+                layout.pages.get(pi).map_or(geo.scale, |page| page_screen_scale(pr, page, geo.scale))
+            });
+        }
         // Content controls: the frame of the one the caret is in (all of them in Design Mode).
         crate::content_controls::paint(app, &painter, &t, &layout, &rects, geo.scale);
         // Read Aloud: the sentence being spoken.
