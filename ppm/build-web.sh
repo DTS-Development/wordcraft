@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# PPM 포크 웹 빌드: 한글 글꼴(OFL-1.1)을 넣어 dist/web 을 만든다.
-# 한글 글꼴 세트(NanumGothic·NanumMyeongjo·NanumGothicCoding·Black Han Sans·Pretendard)와 Office 호환 글꼴(Carlito, Caladea, Liberation)만 들어간다(업스트림 릴리스에 있던 다른 글꼴은 빠진다).
+# PPM 포크 웹 빌드: 한글 글꼴과 일본어 글꼴(OFL-1.1)을 넣어 dist/web 을 만든다.
+# 한글 글꼴 세트(NanumGothic·NanumMyeongjo·NanumGothicCoding·Black Han Sans·Pretendard), 일본어 글꼴(BIZ UDPGothic Regular)과 Office 호환 글꼴(Carlito, Caladea, Liberation)만 들어간다(업스트림 릴리스에 있던 다른 글꼴은 빠진다).
 # 필요: Rust 1.95+ (기본 1.99.1), wasm32-unknown-unknown target, trunk 0.21+
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -35,6 +35,8 @@ for dir in nanum-myeongjo nanum-gothic-coding black-han-sans pretendard; do
     [ -f "$lic" ] && cp "$lic" "$root/dist/web/licenses/$dir-$(basename "$lic")"
   done
 done
+# 일본어 글꼴(BIZ UDPGothic Regular): ?lang=ja 화면과 문서의 일본어 글자에 쓴다.
+cp "$root/ppm/fonts-ko/fonts/biz-udpgothic/OFL.txt" "$root/dist/web/licenses/biz-udpgothic-OFL.txt"
 # Office 호환 글꼴(Carlito, Caladea, Liberation): 글꼴마다 자기 라이선스(Caladea만 Apache-2.0)가 함께 간다.
 for dir in carlito caladea liberation-sans liberation-serif liberation-mono; do
   for lic in "$root/ppm/fonts-ko/fonts/$dir/OFL.txt" "$root/ppm/fonts-ko/fonts/$dir/LICENSE.txt"; do
