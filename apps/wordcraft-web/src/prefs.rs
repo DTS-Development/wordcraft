@@ -13,8 +13,10 @@ const MAX_STORED: usize = 4 << 20;
 
 /// Apply preferences stored on an earlier visit. Missing, oversized or unreadable values leave
 /// the defaults. `host`: PPM's page owns the files, so no recent file names are taken back, and the
-/// interface is Korean whatever the browser or the stored setting says.
-pub fn restore(app: &mut WordApp, stored: Option<&str>, host: bool) {
+/// interface language is the page's, not the browser's or the stored one: `lang` (the page's
+/// `?lang=` value) when it names a language WordCraft has, else Korean. Without `host`, `lang` is
+/// not read.
+pub fn restore(app: &mut WordApp, stored: Option<&str>, host: bool, lang: Option<&str>) {
     if let Some(s) = stored.filter(|s| s.len() <= MAX_STORED)
         && let Some(ui) = UiState::from_json(s.as_bytes())
     {
@@ -22,12 +24,19 @@ pub fn restore(app: &mut WordApp, stored: Option<&str>, host: bool) {
     }
     if host {
         app.ui.recent.clear();
-        app.ui.language = HOST_LANGUAGE.into();
+        app.ui.language = host_language(lang).into();
     }
 }
 
-/// The interface language of the PPM (host) build.
+/// The interface language of the PPM (host) build when its page names none (or one WordCraft
+/// lacks).
 const HOST_LANGUAGE: &str = "ko";
+
+/// The PPM build's interface language for the page's `?lang=` value: a registered language code
+/// (any case), else [`HOST_LANGUAGE`]. `auto` is not taken: the page decides, not the browser.
+fn host_language(lang: Option<&str>) -> &'static str {
+    lang.and_then(wordcraft_ui_egui::i18n::normalize_pref).filter(|l| *l != wordcraft_ui_egui::i18n::AUTO).unwrap_or(HOST_LANGUAGE)
+}
 
 /// Tracks what was last written, so the store is written only when a preference changed.
 #[derive(Default)]
@@ -92,7 +101,7 @@ mod tests {
         let stored = sync.changed(&first).expect("the theme change is stored");
 
         let mut reloaded = app();
-        restore(&mut reloaded, Some(&stored), false);
+        restore(&mut reloaded, Some(&stored), false, None);
         assert_eq!(reloaded.ui.theme, wordcraft_ui_egui::theme::Appearance::Dark);
         assert_eq!(PrefsSync::new(Some(stored)).changed(&reloaded), None, "restoring doesn't write back");
     }
@@ -101,7 +110,7 @@ mod tests {
     fn junk_storage_keeps_defaults() {
         for junk in [None, Some(""), Some("not json"), Some("[1,2]"), Some("{\"theme\":42}")] {
             let mut a = app();
-            restore(&mut a, junk, false);
+            restore(&mut a, junk, false, None);
             assert_eq!(a.ui.theme, wordcraft_ui_egui::theme::Appearance::System, "junk keeps the default appearance");
         }
     }
@@ -116,7 +125,7 @@ mod tests {
         assert!(with_names.contains("secret plan"), "the fixture stores a name");
 
         let mut host = app();
-        restore(&mut host, Some(&with_names), true);
+        restore(&mut host, Some(&with_names), true, None);
         assert!(host.ui.recent.is_empty(), "nothing is restored");
         let mut sync = PrefsSync::new(Some(with_names)).host(true);
         let rewritten = sync.changed(&host).expect("the store held names, so it is written over");
@@ -135,25 +144,36 @@ mod tests {
         let stored = serde_json::to_string(&other.prefs()).unwrap();
 
         let mut host = app();
-        restore(&mut host, Some(&stored), true);
+        restore(&mut host, Some(&stored), true, None);
         assert_eq!(host.ui.language, "ko");
         assert_eq!(wordcraft_ui_egui::i18n::Lang::from_pref(&host.ui.language).code(), "ko");
         let mut fresh = app();
-        restore(&mut fresh, None, true);
+        restore(&mut fresh, None, true, None);
         assert_eq!(fresh.ui.language, "ko");
         // A stored English (the visitor chose it in an earlier session) is ignored too.
         let mut english = app();
         english.ui.language = "en".into();
         let stored_en = serde_json::to_string(&english.prefs()).unwrap();
         let mut host_en = app();
-        restore(&mut host_en, Some(&stored_en), true);
+        restore(&mut host_en, Some(&stored_en), true, None);
         assert_eq!(host_en.ui.language, "ko");
 
+        // The page's `?lang=` picks the language; one WordCraft has no catalog for keeps Korean.
+        for (asked, want) in [("ja", "ja"), ("en", "en"), ("EN", "en"), ("auto", "ko"), ("xx", "ko"), ("", "ko")] {
+            let mut framed = app();
+            restore(&mut framed, Some(&stored), true, Some(asked));
+            assert_eq!(framed.ui.language, want, "?lang={asked}");
+        }
+        // The upstream build does not read it.
+        let mut upstream_lang = app();
+        restore(&mut upstream_lang, Some(&stored), false, Some("ja"));
+        assert_eq!(upstream_lang.ui.language, "de");
+
         let mut upstream = app();
-        restore(&mut upstream, Some(&stored), false);
+        restore(&mut upstream, Some(&stored), false, None);
         assert_eq!(upstream.ui.language, "de");
         let mut auto = app();
-        restore(&mut auto, None, false);
+        restore(&mut auto, None, false, None);
         assert_eq!(auto.ui.language, wordcraft_ui_egui::i18n::AUTO);
     }
 }

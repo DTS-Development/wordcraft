@@ -99,7 +99,7 @@ pub fn start() {
                     app.autosave = false;
                     // Preferences from an earlier visit (#2132), as the desktop app reads `ui.json`.
                     let stored = stored_prefs();
-                    crate::prefs::restore(&mut app, stored.as_deref(), host);
+                    crate::prefs::restore(&mut app, stored.as_deref(), host, query_param("lang").as_deref());
                     // A region chosen in File › Options replaces the browser's for the first blank
                     // document too (#838).
                     if !sample && app.session.prefs.region.is_some() {

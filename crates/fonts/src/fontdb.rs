@@ -964,6 +964,11 @@ impl FontDb {
     pub fn with_font_dirs(font_dirs: Vec<std::path::PathBuf>) -> Self {
         let mut faces = Vec::new();
         let others = crate::CRAFT_FONTS.iter().filter(|f| !f.scripts.contains(&"Jpan"));
+        // The PPM set is Korean first: hanja and kana in a Korean document keep the Korean face
+        // they had before the set held a Japanese one, which only catches what the others lack.
+        #[cfg(feature = "ppm-host")]
+        let craft = others.chain(crate::japanese_document_fonts()).map(|f| f.bytes);
+        #[cfg(not(feature = "ppm-host"))]
         let craft = crate::japanese_document_fonts().into_iter().chain(others).map(|f| f.bytes);
         for data in BUNDLED.iter().copied().chain(craft) {
             for f in enumerate_faces(data) {
