@@ -1029,6 +1029,10 @@ impl Dialog {
     }
 
     pub fn open(name: &str, app: &mut WordApp) -> Option<Dialog> {
+        // The framing page asked for no About dialog (any of its tabs).
+        if app.about_hidden && matches!(name, "about" | "contributors" | "models") {
+            return None;
+        }
         // View-only: only the dialogs that read the document open (Find, Go To, Word Count).
         if app.read_only() && !matches!(name, "find" | "goto" | "wordCount") {
             return None;

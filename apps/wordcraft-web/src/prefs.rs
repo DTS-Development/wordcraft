@@ -38,6 +38,13 @@ fn host_language(lang: Option<&str>) -> &'static str {
     lang.and_then(wordcraft_ui_egui::i18n::normalize_pref).filter(|l| *l != wordcraft_ui_egui::i18n::AUTO).unwrap_or(HOST_LANGUAGE)
 }
 
+/// Whether the page leaves the About dialog out. Only the PPM (host) build listens, and only to
+/// `?about=off` (also `0`, `false`, `no`): the framing page shows the open-source notices itself and
+/// wants no version / contributors dialog on its screen. Anything else keeps it.
+pub fn about_hidden(host: bool, requested: Option<&str>) -> bool {
+    host && requested.is_some_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "off" | "0" | "false" | "no"))
+}
+
 /// Tracks what was last written, so the store is written only when a preference changed.
 #[derive(Default)]
 pub struct PrefsSync {
@@ -87,6 +94,27 @@ mod tests {
 
     fn app() -> WordApp {
         WordApp::new(wordcraft_engine::Session::new(wordcraft_engine::sample::sample_document()), Services::default())
+    }
+
+    /// `?about=off`: only the host build listens, and then the About dialog (any tab) does not open.
+    #[test]
+    fn only_the_host_build_leaves_about_out_and_only_when_asked() {
+        for off in ["off", "OFF", "0", "false", "no", " off "] {
+            assert!(about_hidden(true, Some(off)), "{off:?}");
+            assert!(!about_hidden(false, Some(off)), "the upstream build keeps About: {off:?}");
+        }
+        for keep in [None, Some(""), Some("on"), Some("1"), Some("true"), Some("hide")] {
+            assert!(!about_hidden(true, keep), "{keep:?}");
+        }
+        let mut a = app();
+        for name in ["about", "contributors", "models"] {
+            assert!(wordcraft_ui_egui::dialogs::Dialog::open(name, &mut a).is_some(), "{name} opens by default");
+        }
+        a.about_hidden = true;
+        for name in ["about", "contributors", "models"] {
+            assert!(wordcraft_ui_egui::dialogs::Dialog::open(name, &mut a).is_none(), "{name} stays shut");
+        }
+        assert!(wordcraft_ui_egui::dialogs::Dialog::open("wordCount", &mut a).is_some(), "other dialogs still open");
     }
 
     /// #2132: dark mode chosen on one visit is there after a reload.

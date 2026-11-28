@@ -529,6 +529,10 @@ fn migrate_units(v: &mut Value) {
 pub struct WordApp {
     pub session: Session,
     pub ui: UiState,
+    /// The page that frames a host build asked for no About dialog (`?about=off`): Help ▸ Help and
+    /// the File page's About are not drawn and the dialog (version, contributors, models) does not
+    /// open. The host shows the open-source notices on its own screen. Not a saved preference.
+    pub about_hidden: bool,
     pub services: Services,
     pub printing: printing::State,
     print_feedback_seen: Option<printing::Feedback>,
@@ -696,6 +700,7 @@ impl WordApp {
             services,
             printing: Default::default(),
             print_feedback_seen: None,
+            about_hidden: false,
             canvas: canvas::CanvasState::default(),
             controls: Default::default(),
             dialog: None,

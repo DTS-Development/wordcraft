@@ -100,6 +100,8 @@ pub fn start() {
                     // Preferences from an earlier visit (#2132), as the desktop app reads `ui.json`.
                     let stored = stored_prefs();
                     crate::prefs::restore(&mut app, stored.as_deref(), host, query_param("lang").as_deref());
+                    // `?about=off` on the PPM page: no About entry or dialog (see `about_hidden`).
+                    app.about_hidden = crate::prefs::about_hidden(host, query_param("about").as_deref());
                     // A region chosen in File › Options replaces the browser's for the first blank
                     // document too (#838).
                     if !sample && app.session.prefs.region.is_some() {

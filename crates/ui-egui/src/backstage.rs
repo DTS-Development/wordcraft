@@ -144,7 +144,7 @@ pub fn show(app: &mut WordApp, ui: &mut Ui) {
             }
             ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
                 for (label, id) in [("About", "about"), ("Discord community", "discord")] {
-                    if id == "discord" && !app.links_allowed() {
+                    if (id == "discord" && !app.links_allowed()) || (id == "about" && app.about_hidden) {
                         continue;
                     }
                     let (r, resp) = ui.allocate_exact_size(vec2(200.0, 32.0), Sense::click());
